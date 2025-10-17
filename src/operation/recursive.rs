@@ -68,7 +68,7 @@ impl Context {
                 continue;
             }
 
-            for entry in WalkDir::new(&from_parent).into_iter() {
+            for entry in WalkDir::new(&from_parent) {
                 self.controller
                     .check()
                     .await
@@ -76,7 +76,7 @@ impl Context {
 
                 let entry = entry.map_err(|err| {
                     OperationError::from_err(
-                        format!("failed to walk directory {:?}: {}", from_parent, err),
+                        format!("failed to walk directory {}: {err}", from_parent.display()),
                         &self.controller,
                     )
                 })?;
@@ -92,7 +92,7 @@ impl Context {
                 } else if file_type.is_symlink() {
                     let target = fs::read_link(&from).map_err(|err| {
                         OperationError::from_err(
-                            format!("failed to read link {:?}: {}", from, err),
+                            format!("failed to read link {:?}: {err}", from.display()),
                             &self.controller,
                         )
                     })?;
@@ -111,8 +111,9 @@ impl Context {
                     let relative = from.strip_prefix(&from_parent).map_err(|err| {
                         OperationError::from_err(
                             format!(
-                                "failed to remove prefix {:?} from {:?}: {}",
-                                from_parent, from, err
+                                "failed to remove prefix {:?} from {:?}: {err}",
+                                from_parent.display(),
+                                from.display()
                             ),
                             &self.controller,
                         )
@@ -163,8 +164,10 @@ impl Context {
             if op.run(self, progress).await.map_err(|err| {
                 OperationError::from_err(
                     format!(
-                        "failed to {:?} {:?} to {:?}: {}",
-                        op.kind, op.from, op.to, err
+                        "failed to {:?} {} to {}: {err}",
+                        op.kind,
+                        op.from.display(),
+                        op.to.display()
                     ),
                     &self.controller,
                 )
@@ -209,7 +212,7 @@ impl Context {
             }
             ReplaceResult::KeepBoth => match op.to.parent() {
                 Some(to_parent) => Ok(ControlFlow::Continue(copy_unique_path(&op.from, to_parent))),
-                None => Err(format!("failed to get parent of {:?}", op.to).into()),
+                None => Err(format!("failed to get parent of {}", op.to.display()).into()),
             },
             ReplaceResult::Skip(apply_to_all) => {
                 if apply_to_all {
@@ -319,7 +322,7 @@ impl Op {
                 (ctx.on_progress)(self, &progress);
                 if let Err(err) = to_file.set_permissions(metadata.permissions()).await {
                     // This error is not propagated upwards as some filesystems do not support setting permissions
-                    log::warn!("failed to set permissions for {:?}: {}", self.to, err);
+                    log::warn!("failed to set permissions for {}: {err}", self.to.display());
                 }
 
                 // Prevent spamming the progress callbacks.
@@ -410,9 +413,9 @@ impl Op {
                                 is_cleanup: self.is_cleanup,
                             };
                             return Box::pin(copy_op.run(ctx, progress)).await;
-                        } else {
-                            return Err(err.into());
                         }
+
+                        return Err(err.into());
                     }
                 }
             }

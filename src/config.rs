@@ -27,7 +27,7 @@ pub const ICON_SCALE_MAX: u16 = 5;
 
 macro_rules! percent {
     ($perc:expr, $pixel:ident) => {
-        (($perc.get() as f32 * $pixel as f32) / 100.).clamp(1., ($pixel * ICON_SCALE_MAX) as _)
+        (($perc.get() as f32 * $pixel as f32) / 100.).clamp(1., ($pixel * ICON_SCALE_MAX).into())
     };
 }
 
@@ -115,18 +115,21 @@ pub enum TypeToSearch {
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct State {
-    pub sort_names: ordermap::OrderMap<String, (HeadingOptions, bool)>,
+    pub sort_names: OrderMap<String, (HeadingOptions, bool)>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            sort_names: OrderMap::from_iter(dirs::download_dir().into_iter().map(|dir| {
-                (
-                    Location::Path(dir).normalize().to_string(),
-                    (HeadingOptions::Modified, false),
-                )
-            })),
+            sort_names: dirs::download_dir()
+                .into_iter()
+                .map(|dir| {
+                    (
+                        Location::Path(dir).normalize().to_string(),
+                        (HeadingOptions::Modified, false),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -138,14 +141,14 @@ impl State {
                 let config = match State::get_entry(&config_handler) {
                     Ok(ok) => ok,
                     Err((errs, config)) => {
-                        log::info!("errors loading config: {:?}", errs);
+                        log::info!("errors loading config: {errs:?}");
                         config
                     }
                 };
                 (Some(config_handler), config)
             }
             Err(err) => {
-                log::error!("failed to create config handler: {}", err);
+                log::error!("failed to create config handler: {err}");
                 (None, State::default())
             }
         }
@@ -181,14 +184,14 @@ impl Config {
                 let config = match Config::get_entry(&config_handler) {
                     Ok(ok) => ok,
                     Err((errs, config)) => {
-                        log::info!("errors loading config: {:?}", errs);
+                        log::info!("errors loading config: {errs:?}");
                         config
                     }
                 };
                 (Some(config_handler), config)
             }
             Err(err) => {
-                log::error!("failed to create config handler: {}", err);
+                log::error!("failed to create config handler: {err}");
                 (None, Config::default())
             }
         }

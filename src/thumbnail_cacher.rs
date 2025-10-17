@@ -27,24 +27,30 @@ pub struct ThumbnailCacher {
 impl ThumbnailCacher {
     pub fn new(file_path: &Path, thumbnail_size: ThumbnailSize) -> Result<Self, String> {
         let file_uri = thumbnail_uri(file_path)
-            .map_err(|err| format!("failed to create URI for {file_path:?}: {err}"))?;
+            .map_err(|err| format!("failed to create URI for {}: {err}", file_path.display()))?;
         let cache_base_dir = THUMBNAIL_CACHE_BASE_DIR
             .as_ref()
-            .ok_or("failed to get thumbnail cache directory".to_string())?;
+            .ok_or_else(|| "failed to get thumbnail cache directory".to_string())?;
         let thumbnail_filename = thumbnail_cache_filename(&file_uri);
         let thumbnail_dir = cache_base_dir.join(thumbnail_size.subdirectory_name());
         if !thumbnail_dir.is_dir() {
-            log::warn!("{:?} is not a directory, creating one now", &thumbnail_dir);
-            fs::create_dir_all(&thumbnail_dir).unwrap_or(log::error!(
-                "{:?} failed to create directory, this error can be expected on first run",
-                &thumbnail_dir
-            ));
+            log::warn!(
+                "{} is not a directory, creating one now",
+                thumbnail_dir.display()
+            );
+            if fs::create_dir_all(&thumbnail_dir).is_err() {
+                log::error!(
+                    "{} failed to create directory, this error can be expected on first run",
+                    thumbnail_dir.display()
+                );
+            }
         }
         let thumbnail_path = thumbnail_dir.join(&thumbnail_filename);
-        let thumbnail_fail_marker_path = cache_base_dir
-            .join("fail")
-            .join(format!("cosmic-files-{}", env!("CARGO_PKG_VERSION")))
-            .join(&thumbnail_filename);
+        let mut thumbnail_fail_marker_path = cache_base_dir.join("fail");
+        thumbnail_fail_marker_path.extend([
+            format!("cosmic-files-{}", env!("CARGO_PKG_VERSION")),
+            thumbnail_filename,
+        ]);
 
         Ok(Self {
             file_path: file_path.to_path_buf(),
@@ -64,7 +70,7 @@ impl ThumbnailCacher {
             std::fs::metadata(&self.file_path),
         ) {
             if metadata.is_file() && self.file_path.starts_with(cache_base_dir) {
-                return CachedThumbnail::Valid((self.file_path.to_path_buf(), None));
+                return CachedThumbnail::Valid((self.file_path.clone(), None));
             }
         }
 
@@ -88,7 +94,10 @@ impl ThumbnailCacher {
         &self.thumbnail_dir
     }
 
-    pub fn update_with_temp_file(&self, temp_file: NamedTempFile) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_temp_file(
+        &self,
+        temp_file: &NamedTempFile,
+    ) -> Result<&Path, Box<dyn Error>> {
         fs::set_permissions(temp_file.path(), fs::Permissions::from_mode(0o600))?;
         self.update_thumbnail_text_metadata(temp_file.path())?;
         fs::rename(temp_file.path(), &self.thumbnail_path)?;
@@ -96,7 +105,7 @@ impl ThumbnailCacher {
         Ok(&self.thumbnail_path)
     }
 
-    pub fn update_with_image(&self, image: DynamicImage) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_image(&self, image: &DynamicImage) -> Result<&Path, Box<dyn Error>> {
         let temp_file = tempfile::Builder::new()
             .prefix("cosmic-files-")
             .tempfile_in(&self.thumbnail_dir)?;
@@ -117,7 +126,7 @@ impl ThumbnailCacher {
                 .write_image_data(&image.into_raw())?;
         }
 
-        self.update_with_temp_file(temp_file)
+        self.update_with_temp_file(&temp_file)
     }
 
     pub fn create_fail_marker(&self) -> Result<(), Box<dyn Error>> {
@@ -145,8 +154,8 @@ impl ThumbnailCacher {
             let info = reader.info();
             let text_chunks: HashMap<String, String> = info
                 .uncompressed_latin1_text
-                .clone()
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|chunk| (chunk.keyword, chunk.text))
                 .collect();
             (
@@ -196,15 +205,17 @@ impl ThumbnailCacher {
     }
 
     fn is_thumbnail_valid(&self, thumbnail_path: &Path) -> bool {
-        let thumbnail_file = match File::open(thumbnail_path) {
-            Ok(file) => file,
-            Err(_) => return false,
+        let Ok(thumbnail_file) = File::open(thumbnail_path) else {
+            return false;
         };
         let decoder = png::Decoder::new(BufReader::new(thumbnail_file));
         let reader = match decoder.read_info() {
             Ok(reader) => reader,
             Err(err) => {
-                log::warn!("failed to decode {thumbnail_path:?} as PNG: {err}");
+                log::warn!(
+                    "failed to decode {} as PNG: {err}",
+                    thumbnail_path.display()
+                );
                 return false;
             }
         };
@@ -227,7 +238,10 @@ impl ThumbnailCacher {
         let metadata = match std::fs::metadata(&self.file_path) {
             Ok(m) => m,
             Err(err) => {
-                log::warn!("failed to get metatdata of {:?}: {}", self.file_path, err);
+                log::warn!(
+                    "failed to get metatdata of {}: {err}",
+                    self.file_path.display()
+                );
                 return false;
             }
         };
@@ -242,9 +256,8 @@ impl ThumbnailCacher {
                 Ok(m) => m,
                 Err(err) => {
                     log::warn!(
-                        "failed to get modified from metatdata of {:?}, {}",
-                        self.file_path,
-                        err
+                        "failed to get modified from metatdata of {}, {err}",
+                        self.file_path.display()
                     );
                     return false;
                 }
@@ -279,16 +292,17 @@ impl ThumbnailCacher {
 
 fn thumbnail_uri(path: &Path) -> io::Result<String> {
     let absolute_path = fs::canonicalize(path)?;
-    let url = Url::from_file_path(&absolute_path).map_err(|_| {
+    let url = Url::from_file_path(&absolute_path).map_err(|()| {
         io::Error::other(format!(
-            "failed to create URI for thumbnail_file: {absolute_path:?}"
+            "failed to create URI for thumbnail_file: {}",
+            absolute_path.display()
         ))
     })?;
     // Technically square brackets don't need to be percent encoded,
     // and they aren't by the url crate, but the thumbnailer used by
     // Gnome Files does. In order to share thumbnails and not get duplicates
     // we should do the same.
-    let url = url.to_string().replace("[", "%5B").replace("]", "%5D");
+    let url = url.to_string().replace('[', "%5B").replace(']', "%5D");
     Ok(url)
 }
 

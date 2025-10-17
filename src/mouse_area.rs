@@ -538,12 +538,12 @@ fn update<Message: Clone>(
         match (position_in, state.last_position) {
             (None, Some(_)) => {
                 if let Some(message) = widget.on_exit.as_ref() {
-                    shell.publish(message())
+                    shell.publish(message());
                 }
             }
             (Some(_), None) => {
                 if let Some(message) = widget.on_enter.as_ref() {
-                    shell.publish(message())
+                    shell.publish(message());
                 }
             }
             _ => {}
@@ -632,8 +632,7 @@ fn update<Message: Clone>(
     let recent_click = state
         .prev_click
         .as_ref()
-        .map(|(_, i)| Instant::now().duration_since(*i) <= DOUBLE_CLICK_DURATION)
-        .unwrap_or_default();
+        .is_some_and(|(_, i)| Instant::now().duration_since(*i) <= DOUBLE_CLICK_DURATION);
     if matches!(
         event,
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
@@ -667,9 +666,9 @@ fn update<Message: Clone>(
 
             if widget.on_right_press_no_capture {
                 return event::Status::Ignored;
-            } else {
-                return event::Status::Captured;
             }
+
+            return event::Status::Captured;
         }
     }
 

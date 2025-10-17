@@ -36,7 +36,7 @@ async fn handle_replace(
     let item_from = match tab::item_from_path(file_from, IconSizes::default()) {
         Ok(ok) => ok,
         Err(err) => {
-            log::warn!("{}", err);
+            log::warn!("{err}");
             return ReplaceResult::Cancel;
         }
     };
@@ -44,7 +44,7 @@ async fn handle_replace(
     let item_to = match tab::item_from_path(file_to, IconSizes::default()) {
         Ok(ok) => ok,
         Err(err) => {
-            log::warn!("{}", err);
+            log::warn!("{err}");
             return ReplaceResult::Cancel;
         }
     };
@@ -95,13 +95,12 @@ async fn copy_or_move(
     compio::runtime::spawn(async move {
         let controller = controller_c;
         log::info!(
-            "{} {:?} to {:?}",
+            "{} {paths:?} to {}",
             match method {
                 Method::Copy => "Copy",
                 Method::Move { .. } => "Move",
             },
-            paths,
-            to
+            to.display()
         );
 
         // Handle duplicate file names by renaming paths
@@ -138,12 +137,14 @@ async fn copy_or_move(
                 //TODO: use compio::fs::rename?
                 match fs::rename(from, to) {
                     Ok(()) => {
-                        log::info!("renamed {from:?} to {to:?}");
+                        log::info!("renamed {} to {}", from.display(), to.display());
                         false
                     }
                     Err(err) => {
                         log::info!(
-                            "failed to rename {from:?} to {to:?}, fallback to recursive move: {err}"
+                            "failed to rename {} to {}, fallback to recursive move: {err}",
+                            from.display(),
+                            to.display()
                         );
                         true
                     }
@@ -206,7 +207,7 @@ fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
         ".tar.pz",
     ];
 
-    let mut to = to.to_owned();
+    let mut to = to.to_path_buf();
     if let Some(file_name) = from.file_name().and_then(|name| name.to_str()) {
         let (stem, ext) = if from.is_dir() {
             (file_name.to_string(), None)
@@ -224,15 +225,14 @@ fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
                 .unwrap_or_else(|| {
                     from.file_stem()
                         .and_then(|s| s.to_str())
-                        .map(|stem| {
+                        .map_or((file_name, None), |stem| {
                             (
                                 stem.to_string(),
                                 from.extension()
-                                    .and_then(|e| e.to_str())
-                                    .map(|e| e.to_string()),
+                                    .and_then(std::ffi::OsStr::to_str)
+                                    .map(str::to_string),
                             )
                         })
-                        .unwrap_or((file_name, None))
                 })
         };
 
@@ -280,7 +280,7 @@ fn paths_parent_name(paths: &[PathBuf]) -> Cow<'_, str> {
         return fl!("unknown-folder").into();
     };
 
-    for path in paths.iter() {
+    for path in paths {
         //TODO: is it possible to have different parents, and what should be returned?
         if path.parent() != Some(parent) {
             return fl!("unknown-folder").into();
@@ -314,17 +314,17 @@ pub enum Operation {
     },
     /// Move items to the trash
     Delete {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
     },
     /// Delete a path from the trash
     DeleteTrash {
-        items: Vec<trash::TrashItem>,
+        items: Box<[trash::TrashItem]>,
     },
     /// Empty the trash
     EmptyTrash,
     /// Uncompress files
     Extract {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
         to: PathBuf,
         password: Option<String>,
     },
@@ -342,10 +342,10 @@ pub enum Operation {
     },
     /// Permanently delete items, skipping the trash
     PermanentlyDelete {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
     },
     RemoveFromRecents {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
     },
     Rename {
         from: PathBuf,
@@ -353,7 +353,7 @@ pub enum Operation {
     },
     /// Restore a path from the trash
     Restore {
-        items: Vec<trash::TrashItem>,
+        items: Box<[trash::TrashItem]>,
     },
     /// Set executable and launch
     SetExecutableAndLaunch {
@@ -622,7 +622,7 @@ impl Operation {
                         let controller = controller_c;
                         let Some(relative_root) = to.parent() else {
                             return Err(OperationError::from_err(
-                                format!("path {:?} has no parent directory", to),
+                                format!("path {} has no parent directory", to.display()),
                                 &controller,
                             ));
                         };
@@ -633,7 +633,7 @@ impl Operation {
                         };
 
                         let mut paths = paths;
-                        for path in paths.clone().iter() {
+                        for path in &paths.clone() {
                             if path.is_dir() {
                                 let new_paths_it = WalkDir::new(path).into_iter();
                                 for entry in new_paths_it.skip(1) {
@@ -915,7 +915,12 @@ impl Operation {
                                 op_sel.ignored.push(path.clone());
                                 op_sel.selected.push(new_dir.clone());
 
-                                crate::archive::extract(path, &new_dir, &password, &controller)?;
+                                crate::archive::extract(
+                                    path,
+                                    &new_dir,
+                                    password.as_deref(),
+                                    &controller,
+                                )?;
                             }
                         }
 
@@ -1008,7 +1013,7 @@ impl Operation {
             }
             Self::RemoveFromRecents { paths } => {
                 tokio::task::spawn_blocking(move || {
-                    let path_refs = paths.iter().map(|p| p.as_ref()).collect::<Vec<&Path>>();
+                    let path_refs = paths.iter().map(PathBuf::as_path).collect::<Box<[_]>>();
                     recently_used_xbel::remove_recently_used(&path_refs)
                 })
                 .await
@@ -1202,7 +1207,7 @@ mod tests {
                         debug!("[{id}] Replace request");
                         tx.send(ReplaceResult::Cancel)
                             .await
-                            .expect("Sending a response to a replace request should succeed")
+                            .expect("Sending a response to a replace request should succeed");
                     }
                     _ => unreachable!(
                         "Only [ `Message::PendingProgress`, `Message::DialogPush(DialogPage::Replace)` ] are sent from operation"
@@ -1257,7 +1262,7 @@ mod tests {
         let base_path = path.join(base_name);
         File::create(&base_path)?;
         debug!("Duplicating {}", base_path.display());
-        operation_copy(vec![base_path.clone()], path.to_owned())
+        operation_copy(vec![base_path.clone()], path.to_path_buf())
             .await
             .expect("Copy operation should have succeeded");
 
@@ -1282,7 +1287,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("First directory exists and has a valid name");
         debug!("Duplicating directory {}", first_dir.display());
-        operation_copy(vec![first_dir.clone()], path.to_owned())
+        operation_copy(vec![first_dir.clone()], path.to_path_buf())
             .await
             .expect("Copy operation should have succeeded");
 
@@ -1304,7 +1309,7 @@ mod tests {
 
         for i in 1..5 {
             debug!("Duplicating {}", base_path.display());
-            operation_copy(vec![base_path.clone()], path.to_owned())
+            operation_copy(vec![base_path.clone()], path.to_path_buf())
                 .await
                 .expect("Copy operation should have succeeded");
             assert!(base_path.exists(), "Original file should still exist");

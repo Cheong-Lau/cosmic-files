@@ -55,13 +55,13 @@ fn menu_button_optional(
     }
 }
 
-pub fn context_menu<'a>(
+pub fn context_menu(
     tab: &Tab,
     key_binds: &HashMap<KeyBind, Action>,
-    modifiers: &Modifiers,
-) -> Element<'a, tab::Message> {
+    modifiers: Modifiers,
+) -> Element<'static, tab::Message> {
     let find_key = |action: &Action| -> String {
-        for (key_bind, key_action) in key_binds.iter() {
+        for (key_bind, key_action) in key_binds {
             if action == key_action {
                 return key_bind.to_string();
             }
@@ -110,7 +110,7 @@ pub fn context_menu<'a>(
     let mut selected_types: Vec<Mime> = vec![];
     let mut selected_mount_point = 0;
     if let Some(items) = tab.items_opt() {
-        for item in items.iter() {
+        for item in items {
             if item.selected {
                 selected += 1;
                 if item.metadata.is_dir() {
@@ -131,7 +131,7 @@ pub fn context_menu<'a>(
                 selected_types.push(item.mime.clone());
             }
         }
-    };
+    }
     selected_types.sort_unstable();
     selected_types.dedup();
     selected_trash_only = selected_trash_only && selected == 1;
@@ -168,7 +168,7 @@ pub fn context_menu<'a>(
                 #[cfg(feature = "desktop")]
                 {
                     for (i, action) in entry.desktop_actions.into_iter().enumerate() {
-                        children.push(menu_item(action.name, Action::ExecEntryAction(i)).into())
+                        children.push(menu_item(action.name, Action::ExecEntryAction(i)).into());
                     }
                 }
                 children.push(divider::horizontal::light().into());
@@ -210,7 +210,7 @@ pub fn context_menu<'a>(
                 let supported_archive_types = crate::archive::SUPPORTED_ARCHIVE_TYPES
                     .iter()
                     .filter_map(|mime_type| mime_type.parse::<Mime>().ok())
-                    .collect::<Vec<_>>();
+                    .collect::<Box<[_]>>();
                 selected_types.retain(|t| !supported_archive_types.contains(t));
                 if selected_types.is_empty() {
                     children.push(menu_item(fl!("extract-here"), Action::ExtractHere).into());
@@ -396,12 +396,12 @@ pub fn dialog_menu(
 
     let mut selected_gallery = 0;
     if let Some(items) = tab.items_opt() {
-        for item in items.iter() {
+        for item in items {
             if item.selected && item.can_gallery() {
                 selected_gallery += 1;
             }
         }
-    };
+    }
 
     MenuBar::new(vec![
         menu::Tree::with_children(
@@ -523,14 +523,14 @@ pub fn dialog_menu(
     .into()
 }
 
-pub fn menu_bar<'a>(
+pub fn menu_bar(
     core: &Core,
     tab_opt: Option<&Tab>,
     config: &Config,
-    modifiers: &Modifiers,
+    modifiers: Modifiers,
     key_binds: &HashMap<KeyBind, Action>,
-) -> Element<'a, Message> {
-    let sort_options = tab_opt.map(|tab| tab.sort_options());
+) -> Element<'static, Message> {
+    let sort_options = tab_opt.map(Tab::sort_options);
     let sort_item = |label, sort, dir| {
         menu::Item::CheckBox(
             label,
@@ -547,7 +547,7 @@ pub fn menu_bar<'a>(
     let mut selected = 0;
     let mut selected_gallery = 0;
     if let Some(items) = tab_opt.and_then(|tab| tab.items_opt()) {
-        for item in items.iter() {
+        for item in items {
             if item.selected {
                 selected += 1;
                 if item.metadata.is_dir() {
@@ -558,7 +558,7 @@ pub fn menu_bar<'a>(
                 }
             }
         }
-    };
+    }
 
     let (delete_item, delete_item_action) = if in_trash || modifiers.shift() {
         (fl!("delete-permanently"), Action::Delete)

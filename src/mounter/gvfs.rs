@@ -100,9 +100,10 @@ fn network_scan(uri: &str, sizes: IconSizes) -> Result<Vec<tab::Item>, String> {
         let metadata = if !force_dir && !info.boolean(gio::FILE_ATTRIBUTE_FILESYSTEM_REMOTE) {
             let mtime = info.attribute_uint64(gio::FILE_ATTRIBUTE_TIME_MODIFIED);
             let is_dir = matches!(info.file_type(), gio::FileType::Directory);
-            let size_opt = match is_dir {
-                true => None,
-                false => Some(info.size() as u64),
+            let size_opt = if is_dir {
+                None
+            } else {
+                Some(info.size() as u64)
             };
             let mut children_opt = None;
 
@@ -114,7 +115,7 @@ fn network_scan(uri: &str, sizes: IconSizes) -> Result<Vec<tab::Item>, String> {
                             children_opt = Some(entries.count());
                         }
                         Err(err) => {
-                            log::warn!("failed to read directory {:?}: {}", path, err);
+                            log::warn!("failed to read directory {}: {err}", path.display());
                             children_opt = Some(0);
                         }
                     }
@@ -136,15 +137,17 @@ fn network_scan(uri: &str, sizes: IconSizes) -> Result<Vec<tab::Item>, String> {
                 info.icon()
                     .as_ref()
                     .and_then(|icon| gio_icon_to_path(icon, size))
-                    .map(widget::icon::from_path)
-                    .unwrap_or(
-                        widget::icon::from_name(if metadata.is_dir() {
-                            "folder"
-                        } else {
-                            "text-x-generic"
-                        })
-                        .size(size)
-                        .handle(),
+                    .map_or_else(
+                        || {
+                            widget::icon::from_name(if metadata.is_dir() {
+                                "folder"
+                            } else {
+                                "text-x-generic"
+                            })
+                            .size(size)
+                            .handle()
+                        },
+                        widget::icon::from_path,
                     )
             };
             (
@@ -395,7 +398,7 @@ impl Gvfs {
                                     continue;
                                 }
 
-                                log::info!("mount {}", name);
+                                log::info!("mount {name}");
                                 //TODO: do not use name as a URI for mount_op
                                 let mount_op = mount_op(name.to_string(), event_tx.clone());
                                 let event_tx = event_tx.clone();
@@ -406,7 +409,7 @@ impl Gvfs {
                                     Some(&mount_op),
                                     gio::Cancellable::NONE,
                                     move |res| {
-                                        log::info!("mount {}: result {:?}", name, res);
+                                        log::info!("mount {name}: result {res:?}");
                                         event_tx.send(Event::MountResult(mounter_item, match res {
                                             Ok(()) => {
                                                 _ = complete_tx.send(Ok(()));
@@ -416,7 +419,7 @@ impl Gvfs {
                                                 _ = complete_tx.send(Err(anyhow::anyhow!("{err:?}")));
                                                 match err.kind::<gio::IOErrorEnum>() {
                                                 Some(gio::IOErrorEnum::FailedHandled) => Ok(false),
-                                                _ => Err(format!("{}", err))
+                                                _ => Err(err.to_string())
                                             }}
                                         })).unwrap();
                                     },
@@ -433,7 +436,7 @@ impl Gvfs {
                                 Some(&mount_op),
                                 gio::Cancellable::NONE,
                                 move |res| {
-                                    log::info!("network drive {}: result {:?}", uri, res);
+                                    log::info!("network drive {uri}: result {res:?}");
                                     event_tx.send(Event::NetworkResult(uri, match res {
                                         Ok(()) => {
                                             _ = result_tx.send(Ok(()));
@@ -442,7 +445,7 @@ impl Gvfs {
                                             _ = result_tx.send(Err(anyhow::anyhow!("{err:?}")));
                                             match err.kind::<gio::IOErrorEnum>() {
                                             Some(gio::IOErrorEnum::FailedHandled) => Ok(false),
-                                            _ => Err(format!("{}", err))
+                                            _ => Err(err.to_string())
                                         }}
                                     })).unwrap();
                                 }
@@ -475,7 +478,7 @@ impl Gvfs {
                                     Some(&mount_op),
                                     gio::Cancellable::NONE,
                                     move |res| {
-                                        log::info!("network scan mounted {}: result {:?}", uri, res);
+                                        log::info!("network scan mounted {uri}: result {res:?}");
                                         // FIXME sometimes a uri can be mounted and then not recognized as mounted...
                                         // seems to be related to uri with a path
                                         items_tx.blocking_send(network_scan(&original_uri, sizes)).unwrap();
@@ -485,7 +488,7 @@ impl Gvfs {
                                             },
                                             Err(err) => match err.kind::<gio::IOErrorEnum>() {
                                                 Some(gio::IOErrorEnum::FailedHandled) => Ok(false),
-                                                _ => Err(format!("{}", err))
+                                                _ => Err(err.to_string())
                                             }
                                         })).unwrap();
                                     }
@@ -509,25 +512,25 @@ impl Gvfs {
                                 }
 
                                 if MountExt::can_eject(&mount) {
-                                    log::info!("eject {}", name);
+                                    log::info!("eject {name}");
                                     MountExt::eject_with_operation(
                                         &mount,
                                         gio::MountUnmountFlags::NONE,
                                         gio::MountOperation::NONE,
                                         gio::Cancellable::NONE,
                                         move |result| {
-                                            log::info!("eject {}: result {:?}", name, result);
+                                            log::info!("eject {name}: result {result:?}");
                                         },
                                     );
                                 } else {
-                                    log::info!("unmount {}", name);
+                                    log::info!("unmount {name}");
                                     MountExt::unmount_with_operation(
                                         &mount,
                                         gio::MountUnmountFlags::NONE,
                                         gio::MountOperation::NONE,
                                         gio::Cancellable::NONE,
                                         move |result| {
-                                            log::info!("unmount {}: result {:?}", name, result);
+                                            log::info!("unmount {name}: result {result:?}");
                                         },
                                     );
                                 }
@@ -536,7 +539,7 @@ impl Gvfs {
                     }
                 }
             });
-            main_loop.run()
+            main_loop.run();
         });
         Self {
             command_tx,
@@ -596,12 +599,9 @@ impl Mounter for Gvfs {
 
     fn unmount(&self, item: MounterItem) -> Task<()> {
         let command_tx = self.command_tx.clone();
-        Task::perform(
-            async move {
-                command_tx.send(Cmd::Unmount(item)).unwrap();
-            },
-            |x| x,
-        )
+        Task::future(async move {
+            command_tx.send(Cmd::Unmount(item)).unwrap();
+        })
     }
 
     fn subscription(&self) -> Subscription<MounterMessage> {
@@ -615,7 +615,7 @@ impl Mounter for Gvfs {
                     match event {
                         Event::Changed => command_tx.send(Cmd::Rescan).unwrap(),
                         Event::Items(items) => {
-                            output.send(MounterMessage::Items(items)).await.unwrap()
+                            output.send(MounterMessage::Items(items)).await.unwrap();
                         }
                         Event::MountResult(item, res) => output
                             .send(MounterMessage::MountResult(item, res))

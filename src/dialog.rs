@@ -52,7 +52,7 @@ pub struct DialogMessage(cosmic::Action<Message>);
 #[derive(Clone, Debug)]
 pub enum DialogResult {
     Cancel,
-    Open(Vec<PathBuf>),
+    Open(Box<[PathBuf]>),
 }
 
 #[derive(Clone, Debug)]
@@ -196,7 +196,7 @@ impl<T: AsRef<str>> From<T> for DialogLabel {
 impl<'a, M: Clone + 'static> From<&'a DialogLabel> for Element<'a, M> {
     fn from(label: &'a DialogLabel) -> Self {
         let mut iced_spans = Vec::with_capacity(label.spans.len());
-        for span in label.spans.iter() {
+        for span in &label.spans {
             iced_spans.push(cosmic::iced::widget::span(&span.text).underline(span.underline));
         }
         cosmic::iced::widget::rich_text(iced_spans).into()
@@ -211,7 +211,7 @@ pub struct DialogSettings {
 
 impl DialogSettings {
     pub fn new() -> Self {
-        Default::default()
+        Self::default()
     }
 
     pub fn app_id(mut self, app_id: String) -> Self {
@@ -272,7 +272,7 @@ impl<M: Send + 'static> Dialog<M> {
             settings.platform_specific.application_id = dialog_settings.app_id;
         }
 
-        let (window_id, window_command) = window::open(settings.clone());
+        let (window_id, window_command) = window::open(settings);
 
         let mut core = Core::default();
         core.set_main_window_id(Some(window_id));
@@ -282,7 +282,7 @@ impl<M: Send + 'static> Dialog<M> {
                 match fs::canonicalize(path) {
                     Ok(ok) => Some(ok),
                     Err(err) => {
-                        log::warn!("failed to canonicalize {:?}: {}", path, err);
+                        log::warn!("failed to canonicalize {}: {err}", path.display());
                         None
                     }
                 }
@@ -368,7 +368,7 @@ impl<M: Send + 'static> Dialog<M> {
             let on_result_message = (self.on_result)(result);
             Task::batch([
                 command,
-                Task::perform(async move { cosmic::action::app(on_result_message) }, |x| x),
+                Task::future(async move { cosmic::action::app(on_result_message) }),
             ])
         } else {
             command
@@ -588,15 +588,10 @@ impl App {
         row = row.push(widget::horizontal_space());
         row = row.push(widget::button::standard(fl!("cancel")).on_press(Message::Cancel));
 
-        let mut has_selected = false;
-        if let Some(items) = self.tab.items_opt() {
-            for item in items.iter() {
-                if item.selected {
-                    has_selected = true;
-                    break;
-                }
-            }
-        }
+        let has_selected = self
+            .tab
+            .items_opt()
+            .is_some_and(|items| items.iter().any(|item| item.selected));
         row = row.push(
             //TODO: easier way to create buttons with rich text
             widget::button::custom(
@@ -636,7 +631,7 @@ impl App {
             }
             PreviewKind::Location(location) => {
                 if let Some(items) = self.tab.items_opt() {
-                    for item in items.iter() {
+                    for item in items {
                         if item.location_opt.as_ref() == Some(location) {
                             children.push(item.preview_view(None, military_time));
                             // Only show one property view to avoid issues like hangs when generating
@@ -648,7 +643,7 @@ impl App {
             }
             PreviewKind::Selected => {
                 if let Some(items) = self.tab.items_opt() {
-                    for item in items.iter() {
+                    for item in items {
                         if item.selected {
                             children.push(item.preview_view(None, military_time));
                             // Only show one property view to avoid issues like hangs when generating
@@ -671,40 +666,37 @@ impl App {
         let location = self.tab.location.clone();
         let icon_sizes = self.tab.config.icon_sizes;
         let mounter_items = self.mounter_items.clone();
-        Task::perform(
-            async move {
-                let location2 = location.clone();
-                match tokio::task::spawn_blocking(move || location2.scan(icon_sizes)).await {
-                    Ok((parent_item_opt, mut items)) => {
-                        #[cfg(feature = "gvfs")]
-                        {
-                            let mounter_paths: Vec<_> = mounter_items
-                                .iter()
-                                .flat_map(|item| item.1.iter())
-                                .filter_map(|item| item.path())
-                                .collect();
-                            if !mounter_paths.is_empty() {
-                                for item in &mut items {
-                                    item.is_mount_point =
-                                        item.path_opt().is_some_and(|p| mounter_paths.contains(p));
-                                }
+        Task::future(async move {
+            let location2 = location.clone();
+            match tokio::task::spawn_blocking(move || location2.scan(icon_sizes)).await {
+                Ok((parent_item_opt, mut items)) => {
+                    #[cfg(feature = "gvfs")]
+                    {
+                        let mounter_paths: Box<[_]> = mounter_items
+                            .values()
+                            .flatten()
+                            .filter_map(MounterItem::path)
+                            .collect();
+                        if !mounter_paths.is_empty() {
+                            for item in &mut items {
+                                item.is_mount_point =
+                                    item.path_opt().is_some_and(|p| mounter_paths.contains(p));
                             }
                         }
-                        cosmic::action::app(Message::TabRescan(
-                            location,
-                            parent_item_opt,
-                            items,
-                            selection_paths,
-                        ))
                     }
-                    Err(err) => {
-                        log::warn!("failed to rescan: {}", err);
-                        cosmic::action::none()
-                    }
+                    cosmic::action::app(Message::TabRescan(
+                        location,
+                        parent_item_opt,
+                        items,
+                        selection_paths,
+                    ))
                 }
-            },
-            |x| x,
-        )
+                Err(err) => {
+                    log::warn!("failed to rescan: {err}");
+                    cosmic::action::none()
+                }
+            }
+        })
     }
 
     fn search_get(&self) -> Option<&str> {
@@ -719,7 +711,7 @@ impl App {
             Some(term) => self.tab.location.path_opt().map(|path| {
                 (
                     Location::Search(
-                        path.to_path_buf(),
+                        path.clone(),
                         term,
                         self.tab.config.show_hidden,
                         Instant::now(),
@@ -728,7 +720,7 @@ impl App {
                 )
             }),
             None => match &self.tab.location {
-                Location::Search(path, ..) => Some((Location::Path(path.to_path_buf()), false)),
+                Location::Search(path, ..) => Some((Location::Path(path.clone()), false)),
                 _ => None,
             },
         };
@@ -764,7 +756,7 @@ impl App {
                     match self.flags.config.set_dialog(config_handler, dialog) {
                         Ok(_) => {}
                         Err(err) => {
-                            log::warn!("failed to save config \"dialog\": {}", err);
+                            log::warn!("failed to save config \"dialog\": {err}");
                         }
                     }
                 }
@@ -783,8 +775,7 @@ impl App {
         let nav_bar_id = self.nav_model.iter().find(|&id| {
             self.nav_model
                 .data::<Location>(id)
-                .map(|l| l == location)
-                .unwrap_or_default()
+                .is_some_and(|l| l == location)
         });
 
         if let Some(id) = nav_bar_id {
@@ -804,11 +795,11 @@ impl App {
                 .data(Location::Recents)
         });
 
-        for favorite in self.flags.config.favorites.iter() {
+        for favorite in &self.flags.config.favorites {
             if let Some(path) = favorite.path_opt() {
                 let name = if matches!(favorite, Favorite::Home) {
                     fl!("home")
-                } else if let Some(file_name) = path.file_name().and_then(|x| x.to_str()) {
+                } else if let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) {
                     file_name.to_string()
                 } else {
                     continue;
@@ -832,8 +823,8 @@ impl App {
 
         // Collect all mounter items
         let mut nav_items = Vec::new();
-        for (key, items) in self.mounter_items.iter() {
-            for item in items.iter() {
+        for (key, items) in &self.mounter_items {
+            for item in items {
                 nav_items.push((*key, item));
             }
         }
@@ -844,7 +835,7 @@ impl App {
             nav_model = nav_model.insert(|mut b| {
                 b = b.text(item.name()).data(MounterData(key, item.clone()));
                 if let Some(path) = item.path() {
-                    b = b.data(Location::Path(path.clone()));
+                    b = b.data(Location::Path(path));
                 }
                 if let Some(icon) = item.icon(true) {
                     b = b.icon(widget::icon::icon(icon).size(16));
@@ -873,33 +864,33 @@ impl App {
         if let Some((mut watcher, old_paths)) = self.watcher_opt.take() {
             let mut new_paths = HashSet::new();
             if let Some(path) = &self.tab.location.path_opt() {
-                new_paths.insert(path.to_path_buf());
+                new_paths.insert((*path).clone());
             }
 
             // Unwatch paths no longer used
-            for path in old_paths.iter() {
+            for path in &old_paths {
                 if !new_paths.contains(path) {
                     match watcher.unwatch(path) {
                         Ok(()) => {
-                            log::debug!("unwatching {:?}", path);
+                            log::debug!("unwatching {}", path.display());
                         }
                         Err(err) => {
-                            log::debug!("failed to unwatch {:?}: {}", path, err);
+                            log::debug!("failed to unwatch {}: {err}", path.display());
                         }
                     }
                 }
             }
 
             // Watch new paths
-            for path in new_paths.iter() {
+            for path in &new_paths {
                 if !old_paths.contains(path) {
                     //TODO: should this be recursive?
                     match watcher.watch(path, notify::RecursiveMode::NonRecursive) {
                         Ok(()) => {
-                            log::debug!("watching {:?}", path);
+                            log::debug!("watching {}", path.display());
                         }
                         Err(err) => {
-                            log::debug!("failed to watch {:?}: {}", path, err);
+                            log::debug!("failed to watch {}: {err}", path.display());
                         }
                     }
                 }
@@ -946,7 +937,7 @@ impl Application for App {
         let accept_label = flags.kind.accept_label();
 
         let location = Location::Path(match &flags.path_opt {
-            Some(path) => path.to_path_buf(),
+            Some(path) => path.clone(),
             None => match env::current_dir() {
                 Ok(path) => path,
                 Err(_) => home_dir(),
@@ -954,7 +945,7 @@ impl Application for App {
         });
 
         let mut tab = Tab::new(
-            location,
+            &location,
             flags.config.dialog_tab(),
             ThumbCfg::default(),
             None,
@@ -1010,16 +1001,16 @@ impl Application for App {
             ContextPage::Preview(_, kind) => {
                 let mut actions = Vec::with_capacity(3);
                 if let Some(items) = self.tab.items_opt() {
-                    for item in items.iter() {
+                    for item in items {
                         if item.selected {
                             actions.extend(
                                 item.preview_header()
                                     .into_iter()
                                     .map(|element| element.map(Message::TabMessage)),
-                            )
+                            );
                         }
                     }
-                };
+                }
                 Some(
                     context_drawer::context_drawer(
                         self.preview(kind).map(Message::TabMessage),
@@ -1106,9 +1097,7 @@ impl Application for App {
                                         name,
                                     })
                                 })
-                                .on_submit_maybe(
-                                    complete_maybe.clone().map(|maybe| move |_| maybe.clone()),
-                                )
+                                .on_submit_maybe(complete_maybe.map(|maybe| move |_| maybe.clone()))
                                 .into(),
                         ])
                         .spacing(space_xxs),
@@ -1232,7 +1221,7 @@ impl Application for App {
             if let Some(mounter) = MOUNTERS.get(&data.0) {
                 return mounter
                     .mount(data.1.clone())
-                    .map(|_| cosmic::action::none());
+                    .map(|()| cosmic::action::none());
             }
         }
         Task::none()
@@ -1315,12 +1304,12 @@ impl Application for App {
                                 Ok(()) => {
                                     // cd to directory
                                     let message = Message::TabMessage(tab::Message::Location(
-                                        Location::Path(path.clone()),
+                                        Location::Path(path),
                                     ));
                                     return self.update(message);
                                 }
                                 Err(err) => {
-                                    log::warn!("failed to create {:?}: {}", path, err);
+                                    log::warn!("failed to create {}: {err}", path.display());
                                 }
                             }
                         }
@@ -1352,7 +1341,7 @@ impl Application for App {
                 return self.rescan_tab(None);
             }
             Message::Key(modifiers, key, text) => {
-                for (key_bind, action) in self.key_binds.iter() {
+                for (key_bind, action) in &self.key_binds {
                     if key_bind.matches(modifiers, &key) {
                         return self.update(Message::from(action.message()));
                     }
@@ -1409,11 +1398,11 @@ impl Application for App {
                 // Check for unmounted folders
                 let mut unmounted = Vec::new();
                 if let Some(old_items) = self.mounter_items.get(&mounter_key) {
-                    for old_item in old_items.iter() {
+                    for old_item in old_items {
                         if let Some(old_path) = old_item.path() {
                             if old_item.is_mounted() {
                                 let mut still_mounted = false;
-                                for item in mounter_items.iter() {
+                                for item in &mounter_items {
                                     if let Some(path) = item.path() {
                                         if path == old_path && item.is_mounted() {
                                             still_mounted = true;
@@ -1452,27 +1441,25 @@ impl Application for App {
             Message::NewFolder => {
                 if let Some(path) = self.tab.location.path_opt() {
                     self.dialog_pages.push_back(DialogPage::NewFolder {
-                        parent: path.to_path_buf(),
+                        parent: path.clone(),
                         name: String::new(),
                     });
                     return widget::text_input::focus(self.dialog_text_input.clone());
                 }
             }
             Message::NotifyEvents(events) => {
-                log::debug!("{:?}", events);
+                log::debug!("{events:?}");
 
                 if let Some(path) = self.tab.location.path_opt() {
                     let mut contains_change = false;
-                    for event in events.iter() {
-                        for event_path in event.paths.iter() {
+                    for event in &events {
+                        for event_path in &event.paths {
                             if event_path.starts_with(path) {
                                 match event.kind {
                                     notify::EventKind::Modify(
-                                        notify::event::ModifyKind::Metadata(_),
-                                    )
-                                    | notify::EventKind::Modify(notify::event::ModifyKind::Data(
-                                        _,
-                                    )) => {
+                                        notify::event::ModifyKind::Metadata(_)
+                                        | notify::event::ModifyKind::Data(_),
+                                    ) => {
                                         // If metadata or data changed, find the matching item and reload it
                                         //TODO: this could be further optimized by looking at what exactly changed
                                         if let Some(items) = &mut self.tab.items_opt {
@@ -1491,9 +1478,8 @@ impl Application for App {
                                                         }
                                                         Err(err) => {
                                                             log::warn!(
-                                                                "failed to reload metadata for {:?}: {}",
-                                                                path,
-                                                                err
+                                                                "failed to reload metadata for {}: {err}",
+                                                                path.display()
                                                             );
                                                         }
                                                     }
@@ -1527,26 +1513,29 @@ impl Application for App {
                 }
             },
             Message::Open => {
-                let mut paths = Vec::new();
-                if let Some(items) = self.tab.items_opt() {
-                    for item in items.iter() {
-                        if item.selected {
-                            if let Some(path) = item.path_opt() {
-                                paths.push(path.clone());
+                let paths: Box<[_]> = if let Some(items) = self.tab.items_opt() {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            item.selected.then_some({
+                                let path = item.path_opt()?;
                                 let _ = update_recently_used(
-                                    &path.clone(),
+                                    path,
                                     App::APP_ID.to_string(),
                                     "cosmic-files".to_string(),
                                     None,
                                 );
-                            }
-                        }
-                    }
-                }
+                                path.clone()
+                            })
+                        })
+                        .collect()
+                } else {
+                    Box::new([])
+                };
 
                 // Ensure selection is allowed
                 //TODO: improve tab logic so this doesn't block the open button so often
-                for path in paths.iter() {
+                for path in &paths {
                     let path_is_dir = path.is_dir();
                     if path_is_dir != self.flags.kind.is_dir() {
                         if path_is_dir && paths.len() == 1 {
@@ -1555,10 +1544,10 @@ impl Application for App {
                                 Location::Path(path.clone()),
                             ));
                             return self.update(message);
-                        } else {
-                            // Otherwise, this is not a legal selection
-                            return Task::none();
                         }
+
+                        // Otherwise, this is not a legal selection
+                        return Task::none();
                     }
                 }
 
@@ -1571,7 +1560,7 @@ impl Application for App {
                 // If we are in directory mode, return the current directory
                 if self.flags.kind.is_dir() {
                     if let Location::Path(tab_path) = &self.tab.location {
-                        self.result_opt = Some(DialogResult::Open(vec![tab_path.clone()]));
+                        self.result_opt = Some(DialogResult::Open(Box::new([tab_path.clone()])));
                         return window::close(self.flags.window_id);
                     }
                 }
@@ -1590,7 +1579,7 @@ impl Application for App {
                             if path.is_dir() {
                                 // cd to directory
                                 let message = Message::TabMessage(tab::Message::Location(
-                                    Location::Path(path.clone()),
+                                    Location::Path(path),
                                 ));
                                 return self.update(message);
                             } else if !replace && path.exists() {
@@ -1598,7 +1587,7 @@ impl Application for App {
                                     filename: filename.clone(),
                                 });
                             } else {
-                                self.result_opt = Some(DialogResult::Open(vec![path]));
+                                self.result_opt = Some(DialogResult::Open(Box::new([path])));
                                 return window::close(self.flags.window_id);
                             }
                         }
@@ -1637,7 +1626,7 @@ impl Application for App {
                         if let Some(items) = self.tab.items_opt() {
                             if let Some(item) = items.get(click_i) {
                                 if item.selected && !item.metadata.is_dir() {
-                                    *filename = item.name.clone();
+                                    filename.clone_from(&item.name);
                                 }
                             }
                         }
@@ -1705,7 +1694,7 @@ impl Application for App {
                                                         menu::context_menu(
                                                             &app.tab,
                                                             &app.key_binds,
-                                                            &app.modifiers,
+                                                            app.modifiers,
                                                         )
                                                         .map(Message::TabMessage)
                                                         .map(cosmic::Action::App),
@@ -1774,17 +1763,13 @@ impl Application for App {
                             // Parse filters
                             let mut parsed_globs = Vec::new();
                             let mut parsed_mimes = Vec::new();
-                            for pattern in filter.patterns.iter() {
+                            for pattern in &filter.patterns {
                                 match pattern {
                                     DialogFilterPattern::Glob(value) => {
                                         match glob::Pattern::new(value) {
                                             Ok(glob) => parsed_globs.push(glob),
                                             Err(err) => {
-                                                log::warn!(
-                                                    "failed to parse glob {:?}: {}",
-                                                    value,
-                                                    err
-                                                );
+                                                log::warn!("failed to parse glob {value:?}: {err}");
                                             }
                                         }
                                     }
@@ -1792,11 +1777,7 @@ impl Application for App {
                                         match mime_guess::Mime::from_str(value) {
                                             Ok(mime) => parsed_mimes.push(mime),
                                             Err(err) => {
-                                                log::warn!(
-                                                    "failed to parse mime {:?}: {}",
-                                                    value,
-                                                    err
-                                                );
+                                                log::warn!("failed to parse mime {value:?}: {err}");
                                             }
                                         }
                                     }
@@ -1810,14 +1791,14 @@ impl Application for App {
                                 }
 
                                 // Check for mime type match (first because it is faster)
-                                for mime in parsed_mimes.iter() {
+                                for mime in &parsed_mimes {
                                     if mime == &item.mime {
                                         return true;
                                     }
                                 }
 
                                 // Check for glob match (last because it is slower)
-                                for glob in parsed_globs.iter() {
+                                for glob in &parsed_globs {
                                     if glob.matches(&item.name) {
                                         return true;
                                     }
@@ -1831,7 +1812,7 @@ impl Application for App {
 
                     // Select based on filename
                     if let DialogKind::SaveFile { filename } = &self.flags.kind {
-                        for item in items.iter_mut() {
+                        for item in &mut items {
                             item.selected = &item.name == filename;
                         }
                     }
@@ -1843,15 +1824,15 @@ impl Application for App {
                         if !self.flags.kind.multiple() {
                             selection_paths.truncate(1);
                         }
-                        self.tab.select_paths(selection_paths);
+                        self.tab.select_paths(&selection_paths);
                     }
 
                     // Reset focus on location change
                     if self.search_get().is_some() {
                         return widget::text_input::focus(self.search_id.clone());
-                    } else {
-                        return widget::text_input::focus(self.filename_id.clone());
                     }
+
+                    return widget::text_input::focus(self.filename_id.clone());
                 }
             }
             Message::TabView(view) => {
@@ -1944,7 +1925,7 @@ impl Application for App {
                             .on_input(Message::SearchInput),
                     )
                     .padding(space_xxs),
-                )
+                );
             }
         }
 
@@ -2034,15 +2015,14 @@ impl Application for App {
                                                 Ok(()) => {}
                                                 Err(err) => {
                                                     log::warn!(
-                                                        "failed to send notify events: {:?}",
-                                                        err
+                                                        "failed to send notify events: {err:?}"
                                                     );
                                                 }
                                             }
                                         }
                                     }
                                     Err(err) => {
-                                        log::warn!("failed to watch files: {:?}", err);
+                                        log::warn!("failed to watch files: {err:?}");
                                     }
                                 }
                             },
@@ -2059,12 +2039,12 @@ impl Application for App {
                             {
                                 Ok(()) => {}
                                 Err(err) => {
-                                    log::warn!("failed to send notify watcher: {:?}", err);
+                                    log::warn!("failed to send notify watcher: {err:?}");
                                 }
                             }
                         }
                         Err(err) => {
-                            log::warn!("failed to create file watcher: {:?}", err);
+                            log::warn!("failed to create file watcher: {err:?}");
                         }
                     }
 
@@ -2096,7 +2076,7 @@ impl Application for App {
                     |(key, mounter_message)| match mounter_message {
                         MounterMessage::Items(items) => Message::MounterItems(key, items),
                         _ => {
-                            log::warn!("{:?} not supported in dialog mode", mounter_message);
+                            log::warn!("{mounter_message:?} not supported in dialog mode");
                             Message::None
                         }
                     },

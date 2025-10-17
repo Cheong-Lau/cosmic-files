@@ -43,11 +43,10 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
 pub fn extract(
     path: &Path,
     new_dir: &Path,
-    password: &Option<String>,
+    password: Option<&str>,
     controller: &Controller,
 ) -> Result<(), OperationError> {
     let mime = mime_for_path(path, None, false);
-    let password = password.clone();
     match mime.essence_str() {
         "application/gzip" | "application/x-compressed-tar" => {
             OpReader::new(path, controller.clone())
@@ -55,7 +54,7 @@ pub fn extract(
                 .map(flate2::read::GzDecoder::new)
                 .map(tar::Archive::new)
                 .and_then(|mut archive| archive.unpack(new_dir))
-                .map_err(|e| OperationError::from_err(e, controller))?
+                .map_err(|e| OperationError::from_err(e, controller))?;
         }
         "application/x-tar" => OpReader::new(path, controller.clone())
             .map(io::BufReader::new)
@@ -93,10 +92,10 @@ pub fn extract(
                 .map(|reader| lzma_rust2::XzReader::new(reader, true))
                 .map(tar::Archive::new)
                 .and_then(|mut archive| archive.unpack(new_dir))
-                .map_err(|e| OperationError::from_err(e, controller))?
+                .map_err(|e| OperationError::from_err(e, controller))?;
         }
         _ => Err(OperationError::from_err(
-            format!("unsupported mime type {:?}", mime),
+            format!("unsupported mime type {mime:?}"),
             controller,
         ))?,
     }
@@ -107,7 +106,7 @@ pub fn extract(
 fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
     archive: &mut zip::ZipArchive<R>,
     directory: P,
-    password: Option<String>,
+    password: Option<&str>,
     controller: Controller,
 ) -> zip::result::ZipResult<()> {
     use std::{ffi::OsString, fs};
@@ -151,7 +150,7 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
         }?;
         let filepath = file
             .enclosed_name()
-            .ok_or(ZipError::InvalidArchive("Invalid file path".into()))?;
+            .ok_or_else(|| ZipError::InvalidArchive("Invalid file path".into()))?;
 
         let outpath = directory.as_ref().join(filepath);
 
@@ -262,7 +261,7 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
             // Ensure we update children's permissions before making a parent unwritable
             files_by_unix_mode.sort_by_key(|(path, _)| Reverse(path.clone()));
         }
-        for (path, mode) in files_by_unix_mode.into_iter() {
+        for (path, mode) in files_by_unix_mode {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
         }
     }
