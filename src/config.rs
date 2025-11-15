@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     FxOrderMap,
     app::App,
-    tab::{HeadingOptions, Location, View},
+    tab::{HeadingOptions, View},
+    zoom::DEFAULT_ZOOM,
 };
 
 pub const CONFIG_VERSION: u64 = 1;
@@ -117,14 +118,12 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self {
-            sort_names: FxOrderMap::from_iter(dirs::download_dir().into_iter().map(|dir| {
-                (
-                    Location::Path(dir).normalize().to_string(),
-                    (HeadingOptions::Modified, false),
-                )
-            })),
+        let mut sort_names = FxOrderMap::default();
+        if let Some(mut dir) = dirs::download_dir() {
+            dir.push(""); // Normalize dir
+            sort_names.insert(dir.display().to_string(), (HeadingOptions::Modified, false));
         }
+        Self { sort_names }
     }
 }
 
@@ -248,8 +247,8 @@ pub struct DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
-            grid_spacing: 100.try_into().unwrap(),
-            icon_size: 100.try_into().unwrap(),
+            grid_spacing: DEFAULT_ZOOM,
+            icon_size: DEFAULT_ZOOM,
             show_content: true,
             show_mounted_drives: false,
             show_trash: false,
@@ -299,10 +298,12 @@ pub struct ThumbCfg {
 
 impl Default for ThumbCfg {
     fn default() -> Self {
-        Self {
-            jobs: 4.try_into().unwrap(),
-            max_mem_mb: 2000.try_into().unwrap(),
-            max_size_mb: 64.try_into().unwrap(),
+        const {
+            Self {
+                jobs: NonZeroU16::new(4).unwrap(),
+                max_mem_mb: NonZeroU16::new(2000).unwrap(),
+                max_size_mb: NonZeroU16::new(64).unwrap(),
+            }
         }
     }
 }
@@ -354,8 +355,8 @@ pub struct IconSizes {
 impl Default for IconSizes {
     fn default() -> Self {
         Self {
-            list: 100.try_into().unwrap(),
-            grid: 100.try_into().unwrap(),
+            list: DEFAULT_ZOOM,
+            grid: DEFAULT_ZOOM,
         }
     }
 }

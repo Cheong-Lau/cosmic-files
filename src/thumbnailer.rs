@@ -36,7 +36,7 @@ impl Thumbnailer {
                         command.arg(output);
                     }
                     "%s" => {
-                        command.arg(format!("{thumbnail_size}"));
+                        command.arg(thumbnail_size.to_string());
                     }
                     _ => {
                         log::warn!(
@@ -140,13 +140,8 @@ impl ThumbnailerCache {
             for mime_type in mime_types.split_terminator(';') {
                 if let Ok(mime) = mime_type.parse::<Mime>() {
                     log::trace!("thumbnailer {}={}", mime, path.display());
-                    let apps = self
-                        .cache
-                        .entry(mime)
-                        .or_insert_with(|| Vec::with_capacity(1));
-                    apps.push(Thumbnailer {
-                        exec: exec.to_string(),
-                    });
+                    let apps = self.cache.entry(mime).or_default();
+                    apps.push(Thumbnailer { exec: exec.into() });
                 }
             }
         }

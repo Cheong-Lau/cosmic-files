@@ -1,9 +1,7 @@
 use cosmic::widget;
 use image::ImageReader;
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::{Path, PathBuf};
 
 /// Bytes per pixel in RGBA format (Red, Green, Blue, Alpha = 4 bytes)
 pub const RGBA_BYTES_PER_PIXEL: u64 = 4;
@@ -271,68 +269,67 @@ pub async fn decode_large_image(
 
         // Use ImageReader with explicit memory limits to avoid "Memory limit exceeded" errors
         // Gallery mode uses the full memory budget since only one image decodes at a time
-        match image::ImageReader::open(&path) {
-            Ok(reader) => {
-                match reader.with_guessed_format() {
-                    Ok(mut reader) => {
-                        // Note: image crate uses decimal MB (1000^2), not binary MB (1024^2)
-                        let mut limits = image::Limits::default();
-                        limits.max_alloc = Some(GALLERY_MEMORY_LIMIT_MB * DECIMAL_MB_TO_BYTES);
-                        reader.limits(limits);
+        match ImageReader::open(&path).and_then(ImageReader::with_guessed_format) {
+            Ok(mut reader) => {
+                // Note: image crate uses decimal MB (1000^2), not binary MB (1024^2)
+                let mut limits = image::Limits::default();
+                limits.max_alloc = Some(GALLERY_MEMORY_LIMIT_MB * DECIMAL_MB_TO_BYTES);
+                reader.limits(limits);
 
-                        match reader.decode() {
-                            Ok(img) => {
-                                let rgba = img.into_rgba8();
-                                let orig_width = rgba.width();
-                                let orig_height = rgba.height();
+                match reader.decode() {
+                    Ok(img) => {
+                        let rgba = img.into_rgba8();
+                        let orig_width = rgba.width();
+                        let orig_height = rgba.height();
 
-                                // Resize if target dimensions provided
-                                let (final_img, width, height) = if let Some((target_w, target_h)) = target_dimensions {
-                                    log::info!(
-                                        "Resizing {}x{} -> {}x{} for memory optimization: {}",
-                                        orig_width, orig_height, target_w, target_h,
-                                        path.display()
-                                    );
+                        // Resize if target dimensions provided
+                        let (final_img, width, height) = if let Some((target_w, target_h)) =
+                            target_dimensions
+                        {
+                            log::info!(
+                                "Resizing {}x{} -> {}x{} for memory optimization: {}",
+                                orig_width,
+                                orig_height,
+                                target_w,
+                                target_h,
+                                path.display()
+                            );
 
-                                    // Use Lanczos3 for high-quality downsampling
-                                    let resized = image::imageops::resize(
-                                        &rgba,
-                                        target_w,
-                                        target_h,
-                                        image::imageops::FilterType::Lanczos3,
-                                    );
+                            // Use Lanczos3 for high-quality downsampling
+                            let resized = image::imageops::resize(
+                                &rgba,
+                                target_w,
+                                target_h,
+                                image::imageops::FilterType::Lanczos3,
+                            );
 
-                                    let resized_w = resized.width();
-                                    let resized_h = resized.height();
+                            let resized_w = resized.width();
+                            let resized_h = resized.height();
 
-                                    log::info!(
-                                        "Resize complete: {}x{} image now uses ~{} MB instead of ~{} MB",
-                                        resized_w, resized_h,
-                                        (resized_w as u64 * resized_h as u64 * 4) / MB_TO_BYTES,
-                                        (orig_width as u64 * orig_height as u64 * 4) / MB_TO_BYTES
-                                    );
+                            log::info!(
+                                "Resize complete: {}x{} image now uses ~{} MB instead of ~{} MB",
+                                resized_w,
+                                resized_h,
+                                (resized_w as u64 * resized_h as u64 * 4) / MB_TO_BYTES,
+                                (orig_width as u64 * orig_height as u64 * 4) / MB_TO_BYTES
+                            );
 
-                                    (resized, resized_w, resized_h)
-                                } else {
-                                    log::info!(
-                                        "Decoded {}x{} image at full resolution: {}",
-                                        orig_width, orig_height,
-                                        path.display()
-                                    );
-                                    (rgba, orig_width, orig_height)
-                                };
+                            (resized, resized_w, resized_h)
+                        } else {
+                            log::info!(
+                                "Decoded {}x{} image at full resolution: {}",
+                                orig_width,
+                                orig_height,
+                                path.display()
+                            );
+                            (rgba, orig_width, orig_height)
+                        };
 
-                                let pixels = final_img.into_raw();
-                                Some((path, width, height, pixels))
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to decode {}: {}", path.display(), e);
-                                None
-                            }
-                        }
+                        let pixels = final_img.into_raw();
+                        Some((path, width, height, pixels))
                     }
                     Err(e) => {
-                        log::warn!("Failed to guess format for {}: {}", path.display(), e);
+                        log::warn!("Failed to decode {}: {}", path.display(), e);
                         None
                     }
                 }
@@ -352,17 +349,17 @@ pub async fn decode_large_image(
 #[derive(Debug, Default)]
 pub struct LargeImageManager {
     /// Paths of images currently being decoded
-    decoding_images: HashSet<PathBuf>,
+    decoding_images: FxHashSet<PathBuf>,
     /// Cache of decoded image handles
-    decoded_images: HashMap<PathBuf, widget::image::Handle>,
+    decoded_images: FxHashMap<PathBuf, widget::image::Handle>,
     /// Display dimensions used for each decoded image (for resize detection)
-    decoded_display_sizes: HashMap<PathBuf, (u32, u32)>,
+    decoded_display_sizes: FxHashMap<PathBuf, (u32, u32)>,
     /// Errors encountered during decoding
-    decode_errors: HashMap<PathBuf, String>,
+    decode_errors: FxHashMap<PathBuf, String>,
     /// Generation counter for each decode to support cancellation.
     /// When a new decode is started for the same path, the generation is incremented.
     /// Only decodes matching the current generation are accepted when they complete.
-    decode_generations: HashMap<PathBuf, u64>,
+    decode_generations: FxHashMap<PathBuf, u64>,
 }
 
 impl LargeImageManager {
