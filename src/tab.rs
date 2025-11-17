@@ -40,6 +40,7 @@ use cosmic::{
         menu::{action::MenuAction, key_bind::KeyBind},
     },
 };
+use crossbeam_utils::atomic::AtomicCell;
 use i18n_embed::LanguageLoader;
 use icu::{
     datetime::{
@@ -65,7 +66,7 @@ use std::{
     io::{BufRead, BufReader},
     os::unix::fs::MetadataExt,
     path::{self, Path, PathBuf},
-    sync::{Arc, LazyLock, RwLock, atomic},
+    sync::{Arc, LazyLock, atomic},
     time::{Duration, Instant, SystemTime},
 };
 use tempfile::NamedTempFile;
@@ -2519,7 +2520,7 @@ impl Mode {
 struct SearchContext {
     results_rx: mpsc::Receiver<(PathBuf, String, Metadata)>,
     ready: Arc<atomic::AtomicBool>,
-    last_modified_opt: Arc<RwLock<Option<SystemTime>>>,
+    last_modified_opt: Arc<AtomicCell<Option<SystemTime>>>,
 }
 
 pub struct SearchContextWrapper(Option<SearchContext>);
@@ -3965,7 +3966,7 @@ impl Tab {
                             if let Some(last_modified) =
                                 items.last().and_then(|item| item.metadata.modified())
                             {
-                                *context.last_modified_opt.write().unwrap() = Some(last_modified);
+                                context.last_modified_opt.store(Some(last_modified));
                             }
                         }
                     } else {
@@ -6210,7 +6211,7 @@ impl Tab {
                     let (results_tx, results_rx) = mpsc::channel(65536);
 
                     let ready = Arc::new(atomic::AtomicBool::new(false));
-                    let last_modified_opt = Arc::new(RwLock::new(None));
+                    let last_modified_opt = Arc::new(AtomicCell::new(None));
                     output
                         .send(Message::SearchContext(
                             location.clone(),
@@ -6223,7 +6224,6 @@ impl Tab {
                         .await
                         .unwrap();
 
-                    let output = Arc::new(tokio::sync::Mutex::new(output));
                     {
                         let output = output.clone();
                         tokio::task::spawn_blocking(move || {
@@ -6232,9 +6232,9 @@ impl Tab {
                                 &term,
                                 show_hidden,
                                 move |path, name, metadata| -> bool {
+                                    let mut output = output.clone();
                                     // Don't send if the result is too old
-                                    if let Some(last_modified) = *last_modified_opt.read().unwrap()
-                                    {
+                                    if let Some(last_modified) = last_modified_opt.load() {
                                         if let Ok(modified) = metadata.modified() {
                                             if modified < last_modified {
                                                 return true;
@@ -6247,16 +6247,12 @@ impl Tab {
                                     results_tx
                                         .blocking_send((path.into(), name.into(), metadata))
                                         .is_ok()
-                                        && (ready.swap(true, atomic::Ordering::SeqCst) ||
-                                    // Wake up update method
-                                    futures::executor::block_on(async {
-                                        output
-                                            .lock()
-                                            .await
-                                            .send(Message::SearchReady(false))
-                                            .await
-                                    })
-                                    .is_ok())
+                                    && (
+                                        ready.swap(true, atomic::Ordering::SeqCst) ||
+                                        // Wake up update method
+                                        futures::executor::block_on(output.send(Message::SearchReady(false)))
+                                            .is_ok()
+                                    )
                                 },
                             );
                             log::info!(
@@ -6271,7 +6267,7 @@ impl Tab {
                     }
 
                     // Send final ready
-                    _ = output.lock().await.send(Message::SearchReady(true)).await;
+                    _ = output.send(Message::SearchReady(true)).await;
 
                     std::future::pending().await
                 }),
