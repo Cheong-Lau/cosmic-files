@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use crossbeam_utils::atomic::AtomicCell;
+use std::sync::Arc;
 use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -12,8 +13,8 @@ pub enum ControllerState {
 
 #[derive(Debug, Default)]
 struct ControllerInner {
-    state: Mutex<ControllerState>,
-    progress: Mutex<f32>,
+    state: AtomicCell<ControllerState>,
+    progress: AtomicCell<f32>,
     notify: Notify,
 }
 
@@ -47,19 +48,19 @@ impl Controller {
     }
 
     pub fn progress(&self) -> f32 {
-        *self.inner.progress.lock().unwrap()
+        self.inner.progress.load()
     }
 
     pub fn set_progress(&self, progress: f32) {
-        *self.inner.progress.lock().unwrap() = progress;
+        self.inner.progress.store(progress);
     }
 
     pub fn state(&self) -> ControllerState {
-        *self.inner.state.lock().unwrap()
+        self.inner.state.load()
     }
 
     pub fn set_state(&self, state: ControllerState) {
-        *self.inner.state.lock().unwrap() = state;
+        self.inner.state.store(state);
         self.inner.notify.notify_waiters();
     }
 
