@@ -67,8 +67,8 @@ pub enum Favorite {
     Videos,
     Path(PathBuf),
     Network {
-        uri: String,
-        name: String,
+        uri: Box<str>,
+        name: Box<str>,
         path: PathBuf,
     },
 }
@@ -113,7 +113,7 @@ pub enum TypeToSearch {
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct State {
-    pub sort_names: FxOrderMap<String, (HeadingOptions, bool)>,
+    pub sort_names: FxOrderMap<Box<str>, (HeadingOptions, bool)>,
 }
 
 impl Default for State {
@@ -121,7 +121,10 @@ impl Default for State {
         let mut sort_names = FxOrderMap::default();
         if let Some(mut dir) = dirs::download_dir() {
             dir.push(""); // Normalize dir
-            sort_names.insert(dir.display().to_string(), (HeadingOptions::Modified, false));
+            sort_names.insert(
+                dir.display().to_string().into_boxed_str(),
+                (HeadingOptions::Modified, false),
+            );
         }
         Self { sort_names }
     }
