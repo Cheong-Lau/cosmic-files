@@ -67,8 +67,8 @@ pub enum Favorite {
     Videos,
     Path(PathBuf),
     Network {
-        uri: String,
-        name: String,
+        uri: Box<str>,
+        name: Box<str>,
         path: PathBuf,
     },
 }

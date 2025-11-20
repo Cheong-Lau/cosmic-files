@@ -356,17 +356,17 @@ pub async fn decode_large_image(
 #[derive(Debug, Default)]
 pub struct LargeImageManager {
     /// Paths of images currently being decoded
-    decoding_images: FxHashSet<PathBuf>,
+    decoding_images: FxHashSet<Box<Path>>,
     /// Cache of decoded image handles
-    decoded_images: FxHashMap<PathBuf, widget::image::Handle>,
+    decoded_images: FxHashMap<Box<Path>, widget::image::Handle>,
     /// Display dimensions used for each decoded image (for resize detection)
-    decoded_display_sizes: FxHashMap<PathBuf, (u32, u32)>,
+    decoded_display_sizes: FxHashMap<Box<Path>, (u32, u32)>,
     /// Errors encountered during decoding
-    decode_errors: FxHashMap<PathBuf, ImageReadError>,
+    decode_errors: FxHashMap<Box<Path>, ImageReadError>,
     /// Generation counter for each decode to support cancellation.
     /// When a new decode is started for the same path, the generation is incremented.
     /// Only decodes matching the current generation are accepted when they complete.
-    decode_generations: FxHashMap<PathBuf, u64>,
+    decode_generations: FxHashMap<Box<Path>, u64>,
 }
 
 impl LargeImageManager {
@@ -396,7 +396,7 @@ impl LargeImageManager {
         generation: u64,
     ) -> bool {
         // Check if this decode is still current (not superseded by a newer one)
-        if let Some(&current_gen) = self.decode_generations.get(&path) {
+        if let Some(&current_gen) = self.decode_generations.get(path.as_path()) {
             if generation != current_gen {
                 log::info!(
                     "Discarding outdated decode for {} (generation {} != current {})",
@@ -414,17 +414,18 @@ impl LargeImageManager {
             generation
         );
 
-        self.decoded_images.insert(path.clone(), handle);
+        self.decoded_images.insert(path.as_path().into(), handle);
         if let Some(size) = display_size {
-            self.decoded_display_sizes.insert(path.clone(), size);
+            self.decoded_display_sizes
+                .insert(path.as_path().into(), size);
         }
-        self.decoding_images.remove(&path);
+        self.decoding_images.remove(path.as_path());
         true
     }
 
     pub fn store_error(&mut self, path: PathBuf, error: ImageReadError) {
-        self.decode_errors.insert(path.clone(), error);
-        self.decoding_images.remove(&path);
+        self.decoding_images.remove(path.as_path());
+        self.decode_errors.insert(path.into_boxed_path(), error);
     }
 
     pub fn clear_error(&mut self, path: &Path) {
@@ -502,7 +503,7 @@ impl LargeImageManager {
     /// Returns (should_decode, target_dimensions, generation) tuple.
     pub fn try_decode(
         &mut self,
-        path: &PathBuf,
+        path: &Path,
         display_dimensions: Option<(u32, u32)>,
     ) -> (bool, Option<(u32, u32)>, u64) {
         self.clear_error(path);
@@ -523,7 +524,7 @@ impl LargeImageManager {
         let (width, height) = match get_image_dimensions(path) {
             Ok((width, height)) => (width, height),
             Err(e) => {
-                self.store_error(path.clone(), e);
+                self.store_error(path.to_path_buf(), e);
                 return (false, None, 0);
             }
         };
@@ -543,7 +544,7 @@ impl LargeImageManager {
         // Increment generation counter (cancels any previous decode)
         let generation = self
             .decode_generations
-            .entry(path.clone())
+            .entry(path.into())
             .and_modify(|g| *g += 1)
             .or_insert(1);
         let generation = *generation;
@@ -557,19 +558,19 @@ impl LargeImageManager {
         }
 
         // Mark as decoding
-        self.decoding_images.insert(path.clone());
+        self.decoding_images.insert(path.into());
         (true, target_dimensions, generation)
     }
 
     /// Check if sufficient memory is available, clearing cache if needed.
     /// Returns true if memory is available, false otherwise.
-    fn ensure_memory_available(&mut self, path: &PathBuf, width: u32, height: u32) -> bool {
+    fn ensure_memory_available(&mut self, path: &Path, width: u32, height: u32) -> bool {
         match check_memory_available(width, height) {
             Ok(true) => return true,
             Ok(false) => (),
             Err(e) => {
                 log::warn!("Error while checking memory: {e}");
-                self.store_error(path.clone(), e);
+                self.store_error(path.to_path_buf(), e);
             }
         }
 
@@ -595,7 +596,7 @@ impl LargeImageManager {
             Ok(false) => (),
             Err(e) => {
                 log::warn!("Error while checking memory: {e}");
-                self.store_error(path.clone(), e);
+                self.store_error(path.to_path_buf(), e);
             }
         }
 

@@ -13,7 +13,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Thumbnailer {
-    pub exec: String,
+    pub exec: Box<str>,
 }
 
 impl Thumbnailer {
