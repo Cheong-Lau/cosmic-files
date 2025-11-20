@@ -13,6 +13,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
@@ -54,8 +55,8 @@ async fn handle_replace(
     _ = msg_tx
         .send(Message::DialogPush(
             DialogPage::Replace {
-                from: item_from,
-                to: item_to,
+                from: Box::new(item_from),
+                to: Box::new(item_to),
                 multiple,
                 apply_to_all: false,
                 conflict_count,
@@ -85,14 +86,19 @@ pub enum ReplaceResult {
     Cancel,
 }
 
-async fn copy_or_move(
-    paths: Vec<PathBuf>,
-    to: PathBuf,
+async fn copy_or_move<S, P>(
+    paths: S,
+    to: P,
     method: Method,
     msg_tx: Sender<Message>,
     controller: Controller,
-) -> Result<OperationSelection, OperationError> {
+) -> Result<OperationSelection, OperationError>
+where
+    S: IntoIterator<Item = PathBuf> + std::fmt::Debug + 'static,
+    P: AsRef<Path> + 'static,
+{
     compio::runtime::spawn(async move {
+        let to = to.as_ref();
         log::info!(
             "{} {:?} to {}",
             match method {
@@ -106,7 +112,7 @@ async fn copy_or_move(
         // Handle duplicate file names by renaming paths
         let mut from_to_pairs: Vec<(PathBuf, PathBuf)> = paths
             .into_iter()
-            .zip(std::iter::repeat(to.as_path()))
+            .zip(std::iter::repeat(to))
             .filter_map(|(from, to)| {
                 if matches!(from.parent(), Some(parent) if parent == to)
                     && matches!(method, Method::Copy)
@@ -251,16 +257,14 @@ pub fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
         };
 
         for n in 0.. {
-            let new_name = if n == 0 {
-                file_name.to_string()
+            if n == 0 {
+                to.push(file_name);
             } else {
-                match ext {
-                    Some(ext) => format!("{} ({} {}).{}", stem, fl!("copy_noun"), n, ext),
-                    None => format!("{} ({} {})", stem, fl!("copy_noun"), n),
+                to.set_file_name(format!("{} ({} {})", stem, fl!("copy_noun"), n));
+                if let Some(ext) = ext {
+                    to.set_extension(ext);
                 }
             };
-
-            to.push(&new_name);
 
             if !to.exists() {
                 break;
@@ -285,10 +289,12 @@ fn parent_name(path: &Path) -> Cow<'_, str> {
     file_name(parent)
 }
 
-fn paths_parent_name(paths: &[PathBuf]) -> Cow<'_, str> {
+fn paths_parent_name<P: AsRef<Path>>(paths: &[P]) -> Cow<'_, str> {
     let Some(first_path) = paths.first() else {
         return fl!("unknown-folder").into();
     };
+
+    let first_path = first_path.as_ref();
 
     let Some(parent) = first_path.parent() else {
         return fl!("unknown-folder").into();
@@ -296,7 +302,7 @@ fn paths_parent_name(paths: &[PathBuf]) -> Cow<'_, str> {
 
     for path in paths {
         //TODO: is it possible to have different parents, and what should be returned?
-        if path.parent() != Some(parent) {
+        if path.as_ref().parent() != Some(parent) {
             return fl!("unknown-folder").into();
         }
     }
@@ -317,18 +323,18 @@ pub enum Operation {
     /// Compress files
     Compress {
         paths: Vec<PathBuf>,
-        to: PathBuf,
+        to: Arc<Path>,
         archive_type: ArchiveType,
-        password: Option<String>,
+        password: Option<Arc<str>>,
     },
     /// Copy items
     Copy {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
         to: PathBuf,
     },
     /// Move items to the trash
     Delete {
-        paths: Vec<PathBuf>,
+        paths: Box<[Box<Path>]>,
     },
     /// Delete a path from the trash
     DeleteTrash {
@@ -338,13 +344,13 @@ pub enum Operation {
     EmptyTrash,
     /// Uncompress files
     Extract {
-        paths: Box<[PathBuf]>,
-        to: PathBuf,
-        password: Option<String>,
+        paths: Arc<[PathBuf]>,
+        to: Arc<Path>,
+        password: Option<Arc<str>>,
     },
     /// Move items
     Move {
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
         to: PathBuf,
         cross_device_copy: bool,
     },
@@ -356,10 +362,10 @@ pub enum Operation {
     },
     /// Permanently delete items, skipping the trash
     PermanentlyDelete {
-        paths: Box<[PathBuf]>,
+        paths: Box<[Box<Path>]>,
     },
     RemoveFromRecents {
-        paths: Box<[PathBuf]>,
+        paths: Box<[Box<Path>]>,
     },
     Rename {
         from: PathBuf,
@@ -382,7 +388,7 @@ pub enum Operation {
 
 #[derive(Clone, Debug)]
 pub enum OperationErrorType {
-    Generic(String),
+    Generic(Box<str>),
     PasswordRequired,
 }
 #[derive(Clone, Debug)]
@@ -398,7 +404,8 @@ impl OperationError {
         } else {
             controller.cancel();
             fl!("cancelled")
-        };
+        }
+        .into_boxed_str();
 
         Self {
             kind: OperationErrorType::Generic(message),
@@ -409,7 +416,7 @@ impl OperationError {
         controller.set_state(ControllerState::Failed);
 
         Self {
-            kind: OperationErrorType::Generic(err.to_string()),
+            kind: OperationErrorType::Generic(err.to_string().into_boxed_str()),
         }
     }
 
@@ -418,7 +425,7 @@ impl OperationError {
         Self { kind }
     }
 
-    pub fn from_msg(m: impl Into<String>) -> Self {
+    pub fn from_msg(m: impl Into<Box<str>>) -> Self {
         Self {
             kind: OperationErrorType::Generic(m.into()),
         }
@@ -769,7 +776,7 @@ impl Operation {
 
                         Ok(OperationSelection {
                             ignored: paths_clone,
-                            selected: vec![to],
+                            selected: vec![to.to_path_buf()],
                         })
                     },
                 )
@@ -893,7 +900,7 @@ impl Operation {
                     move || -> Result<OperationSelection, OperationError> {
                         let total_paths = paths.len();
                         let mut op_sel = OperationSelection::default();
-                        for (i, path) in paths.into_iter().enumerate() {
+                        for (i, path) in paths.iter().enumerate() {
                             futures::executor::block_on(controller.check())
                                 .map_err(|s| OperationError::from_state(s, &controller))?;
 
@@ -910,9 +917,9 @@ impl Operation {
                                 }
 
                                 let password = password.as_deref();
-                                crate::archive::extract(&path, &new_dir, password, &controller)?;
+                                crate::archive::extract(path, &new_dir, password, &controller)?;
 
-                                op_sel.ignored.push(path);
+                                op_sel.ignored.push(path.clone());
                                 op_sel.selected.push(new_dir);
                             }
                         }
@@ -1166,20 +1173,14 @@ mod tests {
 
     /// Simple wrapper around `[Operation::Copy]`
     pub async fn operation_copy(
-        paths: Vec<PathBuf>,
+        paths: Box<[PathBuf]>,
         to: PathBuf,
     ) -> Result<OperationSelection, OperationError> {
         let id = fastrand::u64(..);
         let (tx, mut rx) = mpsc::channel(1);
-        let paths_clone = paths.clone();
-        let to_clone = to.clone();
 
         // Wrap this into its own future so that it may be polled concurerntly with the message handler.
-        let handle_copy = Operation::Copy {
-            paths: paths_clone,
-            to: to_clone,
-        }
-        .perform(tx, Controller::default());
+        let handle_copy = Operation::Copy { paths, to }.perform(tx, Controller::default());
 
         // Concurrently handling messages will prevent the mpsc channel from blocking when full.
         let handle_messages = async move {
@@ -1224,7 +1225,7 @@ mod tests {
             first_file.display(),
             first_dir.display()
         );
-        operation_copy(vec![first_file.clone()], first_dir.clone())
+        operation_copy([first_file.clone()].into(), first_dir.clone())
             .await
             .expect("Copy operation should have succeeded");
 
@@ -1244,7 +1245,7 @@ mod tests {
         let base_path = path.join(base_name);
         File::create(&base_path)?;
         debug!("Duplicating {}", base_path.display());
-        operation_copy(vec![base_path.clone()], path.to_owned())
+        operation_copy([base_path.clone()].into(), path.to_owned())
             .await
             .expect("Copy operation should have succeeded");
 
@@ -1269,7 +1270,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("First directory exists and has a valid name");
         debug!("Duplicating directory {}", first_dir.display());
-        operation_copy(vec![first_dir.clone()], path.to_owned())
+        operation_copy([first_dir.clone()].into(), path.to_owned())
             .await
             .expect("Copy operation should have succeeded");
 
@@ -1291,7 +1292,7 @@ mod tests {
 
         for i in 1..5 {
             debug!("Duplicating {}", base_path.display());
-            operation_copy(vec![base_path.clone()], path.to_owned())
+            operation_copy([base_path.clone()].into(), path.to_owned())
                 .await
                 .expect("Copy operation should have succeeded");
             assert!(base_path.exists(), "Original file should still exist");
@@ -1331,7 +1332,7 @@ mod tests {
             first_file.display(),
             second_dir.display()
         );
-        operation_copy(vec![first_file.clone()], second_dir.clone())
+        operation_copy([first_file.clone()].into(), second_dir.clone())
             .await
             .expect(concat!(
                 "Copy operation should have been cancelled ",
@@ -1362,7 +1363,7 @@ mod tests {
         let expected = dir_path.join("ferris");
 
         debug!("Copying {} to {}", file_path.display(), expected.display());
-        operation_copy(vec![file_path.clone()], dir_path.clone())
+        operation_copy([file_path.clone()].into(), dir_path.clone())
             .await
             .expect("Copy operation should have succeeded");
 

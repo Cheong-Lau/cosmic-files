@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::{self, BufReader, BufWriter},
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::LazyLock,
     time::UNIX_EPOCH,
 };
@@ -16,12 +16,12 @@ use url::Url;
 /// Implements thumbnail caching based on the freedesktop.org Thumbnail Managing Standard.
 /// <https://specifications.freedesktop.org/thumbnail-spec/latest>/
 pub struct ThumbnailCacher {
-    file_path: PathBuf,
-    file_uri: String,
-    thumbnail_dir: PathBuf,
-    thumbnail_path: PathBuf,
+    file_path: Box<Path>,
+    file_uri: Box<str>,
+    thumbnail_dir: Box<Path>,
+    thumbnail_path: Box<Path>,
     thumbnail_size: ThumbnailSize,
-    thumbnail_fail_marker_path: PathBuf,
+    thumbnail_fail_marker_path: Box<Path>,
 }
 
 impl ThumbnailCacher {
@@ -39,19 +39,19 @@ impl ThumbnailCacher {
             );
             fs::create_dir_all(&thumbnail_dir)?;
         }
-        let thumbnail_path = thumbnail_dir.join(&thumbnail_filename);
+        let thumbnail_path = thumbnail_dir.join(&thumbnail_filename).into_boxed_path();
 
         let mut thumbnail_fail_marker_path = cache_base_dir.join("fail");
         thumbnail_fail_marker_path.push(format!("cosmic-files-{}", env!("CARGO_PKG_VERSION")));
         thumbnail_fail_marker_path.push(&thumbnail_filename);
 
         Ok(Self {
-            file_path: file_path.to_path_buf(),
+            file_path: file_path.into(),
             file_uri,
-            thumbnail_dir,
+            thumbnail_dir: thumbnail_dir.into_boxed_path(),
             thumbnail_path,
             thumbnail_size,
-            thumbnail_fail_marker_path,
+            thumbnail_fail_marker_path: thumbnail_fail_marker_path.into_boxed_path(),
         })
     }
 
@@ -171,7 +171,7 @@ impl ThumbnailCacher {
         encoder.set_depth(bit_depth);
 
         text_chunks.insert("Software".to_string(), "COSMIC Files".to_string());
-        text_chunks.insert("Thumb::URI".to_string(), self.file_uri.clone());
+        text_chunks.insert("Thumb::URI".to_string(), self.file_uri.to_string());
         let metadata = std::fs::metadata(&self.file_path)?;
         let size = metadata.len();
         text_chunks.insert("Thumb::Size".to_string(), size.to_string());
@@ -217,7 +217,7 @@ impl ThumbnailCacher {
             .find(|&text| text.keyword == "Thumb::URI")
             .map(|t| &t.text);
 
-        if thumb_uri.is_none_or(|thumb_uri| *thumb_uri != self.file_uri) {
+        if thumb_uri.is_none_or(|thumb_uri| *thumb_uri != *self.file_uri) {
             return false;
         }
 
@@ -275,7 +275,7 @@ impl ThumbnailCacher {
     }
 }
 
-fn thumbnail_uri(path: &Path) -> io::Result<String> {
+fn thumbnail_uri(path: &Path) -> io::Result<Box<str>> {
     let absolute_path = fs::canonicalize(path)?;
     let url = Url::from_file_path(&absolute_path)
         .expect("Url::from_file_path should not error on an absolute path");
@@ -289,7 +289,7 @@ fn thumbnail_uri(path: &Path) -> io::Result<String> {
     });
 
     let url = BRACES_AC.replace_all(url.as_str(), &["%5B", "%5D"]);
-    Ok(url)
+    Ok(url.into_boxed_str())
 }
 
 fn thumbnail_cache_filename(file_uri: &str) -> String {
@@ -337,7 +337,7 @@ impl From<u32> for ThumbnailSize {
 
 pub enum CachedThumbnail {
     /// The cached thumbnail is valid and should be used with size if known.
-    Valid((PathBuf, Option<ThumbnailSize>)),
+    Valid((Box<Path>, Option<ThumbnailSize>)),
     /// The cached thumbnail doesn't exist or it's invalid and
     /// needs to be recreated with the pixel size.
     RequiresUpdate(ThumbnailSize),
@@ -347,10 +347,10 @@ pub enum CachedThumbnail {
     Failed,
 }
 
-static THUMBNAIL_CACHE_BASE_DIR: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+static THUMBNAIL_CACHE_BASE_DIR: LazyLock<Option<Box<Path>>> = LazyLock::new(|| {
     if let Some(mut cache_dir) = dirs::cache_dir() {
         cache_dir.push("thumbnails");
-        return Some(cache_dir);
+        return Some(cache_dir.into_boxed_path());
     }
 
     log::warn!("failed to get thumbnail cache directory, thumbnails will not be cached");

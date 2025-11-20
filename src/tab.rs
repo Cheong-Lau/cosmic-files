@@ -110,65 +110,68 @@ const THUMBNAIL_SIZE: u32 = (ICON_SIZE_GRID as u32) * (ICON_SCALE_MAX as u32);
 pub static THUMB_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::const_new(num_cpus::get().min(4)));
 
-pub(crate) static SORT_OPTION_FALLBACK: LazyLock<FxHashMap<String, (HeadingOptions, bool)>> =
+pub(crate) static SORT_OPTION_FALLBACK: LazyLock<FxHashMap<Box<str>, (HeadingOptions, bool)>> =
     LazyLock::new(|| {
         let mut sort_names = FxHashMap::default();
         if let Some(mut dir) = dirs::download_dir() {
             dir.push(""); // Normalize dir
-            sort_names.insert(dir.display().to_string(), (HeadingOptions::Modified, false));
+            sort_names.insert(
+                dir.display().to_string().into_boxed_str(),
+                (HeadingOptions::Modified, false),
+            );
         }
         sort_names
     });
 
-static MODE_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
-    vec![
+static MODE_NAMES: LazyLock<[Box<str>; 8]> = LazyLock::new(|| {
+    [
         // Mode 0
-        fl!("none"),
+        fl!("none").into_boxed_str(),
         // Mode 1
-        fl!("execute-only"),
+        fl!("execute-only").into_boxed_str(),
         // Mode 2
-        fl!("write-only"),
+        fl!("write-only").into_boxed_str(),
         // Mode 3
-        fl!("write-execute"),
+        fl!("write-execute").into_boxed_str(),
         // Mode 4
-        fl!("read-only"),
+        fl!("read-only").into_boxed_str(),
         // Mode 5
-        fl!("read-execute"),
+        fl!("read-execute").into_boxed_str(),
         // Mode 6
-        fl!("read-write"),
+        fl!("read-write").into_boxed_str(),
         // Mode 7
-        fl!("read-write-execute"),
+        fl!("read-write-execute").into_boxed_str(),
     ]
 });
 
-static SPECIAL_DIRS: LazyLock<FxHashMap<PathBuf, &'static str>> = LazyLock::new(|| {
+static SPECIAL_DIRS: LazyLock<FxHashMap<Box<Path>, &'static str>> = LazyLock::new(|| {
     let mut special_dirs = FxHashMap::default();
     if let Some(dir) = dirs::document_dir() {
-        special_dirs.insert(dir, "folder-documents");
+        special_dirs.insert(dir.into_boxed_path(), "folder-documents");
     }
     if let Some(dir) = dirs::download_dir() {
-        special_dirs.insert(dir, "folder-download");
+        special_dirs.insert(dir.into_boxed_path(), "folder-download");
     }
     if let Some(dir) = dirs::audio_dir() {
-        special_dirs.insert(dir, "folder-music");
+        special_dirs.insert(dir.into_boxed_path(), "folder-music");
     }
     if let Some(dir) = dirs::picture_dir() {
-        special_dirs.insert(dir, "folder-pictures");
+        special_dirs.insert(dir.into_boxed_path(), "folder-pictures");
     }
     if let Some(dir) = dirs::public_dir() {
-        special_dirs.insert(dir, "folder-publicshare");
+        special_dirs.insert(dir.into_boxed_path(), "folder-publicshare");
     }
     if let Some(dir) = dirs::template_dir() {
-        special_dirs.insert(dir, "folder-templates");
+        special_dirs.insert(dir.into_boxed_path(), "folder-templates");
     }
     if let Some(dir) = dirs::video_dir() {
-        special_dirs.insert(dir, "folder-videos");
+        special_dirs.insert(dir.into_boxed_path(), "folder-videos");
     }
     if let Some(dir) = dirs::desktop_dir() {
-        special_dirs.insert(dir, "user-desktop");
+        special_dirs.insert(dir.into_boxed_path(), "user-desktop");
     }
     if let Some(dir) = dirs::home_dir() {
-        special_dirs.insert(dir, "user-home");
+        special_dirs.insert(dir.into_boxed_path(), "user-home");
     }
     special_dirs
 });
@@ -294,13 +297,13 @@ fn button_style(
     }
 }
 
-pub fn folder_icon(path: &PathBuf, icon_size: u16) -> widget::icon::Handle {
+pub fn folder_icon(path: &Path, icon_size: u16) -> widget::icon::Handle {
     widget::icon::from_name(SPECIAL_DIRS.get(path).map_or("folder", |x| *x))
         .size(icon_size)
         .handle()
 }
 
-pub fn folder_icon_symbolic(path: &PathBuf, icon_size: u16) -> widget::icon::Handle {
+pub fn folder_icon_symbolic(path: &Path, icon_size: u16) -> widget::icon::Handle {
     widget::icon::from_name(format!(
         "{}-symbolic",
         SPECIAL_DIRS.get(path).map_or("folder", |x| *x)
@@ -390,23 +393,31 @@ pub fn trash_icon_symbolic(icon_size: u16) -> widget::icon::Handle {
     .handle()
 }
 
-//TODO: translate, add more levels?
-fn format_size(size: u64) -> String {
-    const KB: u64 = 1000;
-    const MB: u64 = 1000 * KB;
-    const GB: u64 = 1000 * MB;
-    const TB: u64 = 1000 * GB;
+/// A helper struct to help display the size with the correct units.
+struct SizeFmt(u64);
 
-    if size >= TB {
-        format!("{:.1} TB", size as f64 / TB as f64)
-    } else if size >= GB {
-        format!("{:.1} GB", size as f64 / GB as f64)
-    } else if size >= MB {
-        format!("{:.1} MB", size as f64 / MB as f64)
-    } else if size >= KB {
-        format!("{:.1} KB", size as f64 / KB as f64)
-    } else {
-        format!("{size} B")
+impl Display for SizeFmt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        //TODO: translate, add more levels?
+
+        const KB: u64 = 1000;
+        const MB: u64 = 1000 * KB;
+        const GB: u64 = 1000 * MB;
+        const TB: u64 = 1000 * GB;
+
+        let size = self.0;
+
+        if size >= TB {
+            write!(f, "{:.1} TB", size as f64 / TB as f64)
+        } else if size >= GB {
+            write!(f, "{:.1} GB", size as f64 / GB as f64)
+        } else if size >= MB {
+            write!(f, "{:.1} MB", size as f64 / MB as f64)
+        } else if size >= KB {
+            write!(f, "{:.1} KB", size as f64 / KB as f64)
+        } else {
+            write!(f, "{size} B")
+        }
     }
 }
 
@@ -661,7 +672,12 @@ pub fn parse_desktop_file(path: &Path) -> (Option<String>, Option<String>) {
     )
 }
 
-fn display_name_for_file(path: &Path, name: &str, get_from_gvfs: bool, is_desktop: bool) -> String {
+fn display_name_for_file(
+    path: &Path,
+    name: &str,
+    get_from_gvfs: bool,
+    is_desktop: bool,
+) -> Box<str> {
     if is_desktop && let Some(desktop_name) = get_desktop_file_display_name(path) {
         return Item::display_name(desktop_name.as_str());
     } else if get_from_gvfs {
@@ -1286,7 +1302,7 @@ pub fn scan_desktop(
             items.extend(mounter_items.into_iter().filter_map(|mounter_item| {
                 let path = mounter_item.path()?;
                 // Get most item data from path
-                let mut item = match item_from_path(&path, sizes) {
+                let mut item = match item_from_path(path, sizes) {
                     Ok(item) => item,
                     Err(err) => {
                         log::warn!(
@@ -1299,7 +1315,7 @@ pub fn scan_desktop(
                 };
 
                 //Override some data with mounter information
-                item.name = mounter_item.name();
+                mounter_item.name().clone_into(&mut item.name);
                 item.display_name = Item::display_name(&item.name);
 
                 //TODO: use icon size for mounter item icon
@@ -1422,7 +1438,7 @@ impl From<Location> for EditLocation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Location {
     Desktop(PathBuf, String, DesktopConfig),
-    Network(String, String, Option<PathBuf>),
+    Network(String, Box<str>, Option<PathBuf>),
     Path(PathBuf),
     Recents,
     Search(PathBuf, String, bool, Instant),
@@ -1446,40 +1462,31 @@ impl std::fmt::Display for Location {
 
 impl Location {
     pub fn normalize(&self) -> Self {
-        if let Self::Network(uri, ..) = self {
-            if uri.ends_with('/') {
-                self.clone()
-            } else {
-                let mut uri = uri.clone();
-                uri.push('/');
-                self.with_uri(uri)
-            }
-        } else if let Some(mut path) = self.path_opt().cloned() {
-            // Canonicalize path, if possible
-            if let Ok(canonical) = fs::canonicalize(&path) {
-                path = canonical;
-            }
-            // Add trailing slash if location is a directory
-            if path.is_dir() {
-                path.push("");
-            }
-            self.with_path(path)
-        } else {
-            self.clone()
+        let mut new_location = self.clone();
+        new_location.normalize_in_place();
+        new_location
+    }
+
+    pub(crate) fn normalize_in_place(&mut self) {
+        if let Self::Network(uri, ..) = self
+            && !uri.ends_with('/')
+        {
+            uri.push('/');
+        } else if let Self::Desktop(path, ..) | Self::Path(path) | Self::Search(path, ..) = self {
+            // Add trailing slash if location is a path
+            path.push("");
         }
     }
 
-    pub fn ancestors(&self) -> Vec<(Self, String)> {
-        self.path_opt().map_or_else(Default::default, |path| {
-            path.ancestors()
-                .scan(false, |found_home, ancestor| {
-                    (!*found_home).then(|| {
-                        let (name, is_home) = folder_name(ancestor);
-                        *found_home = is_home;
-                        (self.with_path(ancestor.to_path_buf()), name)
-                    })
+    pub fn ancestors(&self) -> Option<impl Iterator<Item = (Self, Box<str>)>> {
+        self.path_opt().map(|path| {
+            path.ancestors().scan(false, |found_home, ancestor| {
+                (!*found_home).then(|| {
+                    let (name, is_home) = folder_name(ancestor);
+                    *found_home = is_home;
+                    (self.with_path(ancestor.to_path_buf()), name)
                 })
-                .collect()
+            })
         })
     }
 
@@ -1542,17 +1549,17 @@ impl Location {
         (parent_item_opt, items)
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self) -> Box<str> {
         match self {
             Self::Desktop(path, ..) | Self::Path(path) => folder_name(path).0,
             Self::Search(path, term, ..) => {
                 //TODO: translate
                 let (name, _) = folder_name(path);
-                format!("Search \"{term}\": {name}")
+                format!("Search \"{term}\": {name}").into_boxed_str()
             }
-            Self::Trash => fl!("trash"),
-            Self::Recents => fl!("recents"),
-            Self::Network(display_name, ..) => display_name.clone(),
+            Self::Trash => fl!("trash").into_boxed_str(),
+            Self::Recents => fl!("recents").into_boxed_str(),
+            Self::Network(display_name, ..) => display_name.as_str().into(),
         }
     }
 
@@ -1605,22 +1612,22 @@ pub enum Command {
     AddNetworkDrive,
     AddToSidebar(PathBuf),
     AutoScroll(Option<f32>),
-    ChangeLocation(String, Location, Option<Vec<PathBuf>>),
+    ChangeLocation(Box<str>, Location, Option<Box<[PathBuf]>>),
     ContextMenu(Option<Point>, Option<window::Id>),
-    Delete(Vec<PathBuf>),
+    Delete(Box<[PathBuf]>),
     DropFiles(PathBuf, ClipboardPaste),
     EmptyTrash,
     #[cfg(feature = "desktop")]
     ExecEntryAction(cosmic::desktop::DesktopEntryData, usize),
     Iced(TaskWrapper),
-    OpenFile(Vec<PathBuf>),
+    OpenFile(Box<[PathBuf]>),
     OpenInNewTab(PathBuf),
     OpenInNewWindow(PathBuf),
     OpenTrash,
     Preview(PreviewKind),
-    SetOpenWith(Mime, String),
+    SetOpenWith(Mime, Box<str>),
     SetPermissions(PathBuf, u32),
-    SetSort(String, HeadingOptions, bool),
+    SetSort(Box<str>, HeadingOptions, bool),
     WindowDrag,
     WindowToggleMaximize,
 }
@@ -1674,7 +1681,7 @@ pub enum Message {
     SelectAll,
     SelectFirst,
     SelectLast,
-    SetOpenWith(Mime, String),
+    SetOpenWith(Mime, Box<str>),
     SetPermissions(PathBuf, u32),
     SetSort(HeadingOptions, bool),
     TabComplete(PathBuf, Vec<(String, PathBuf)>),
@@ -1722,7 +1729,7 @@ pub enum DirSize {
     Calculating(Controller),
     Directory(u64),
     NotDirectory,
-    Error(String),
+    Error(Box<str>),
 }
 
 #[derive(Clone, Debug)]
@@ -1873,8 +1880,8 @@ impl ItemThumbnail {
                     "skipping internal {} thumbnailer for {}: file size {} is larger than {}",
                     thumbnailer,
                     path.display(),
-                    format_size(size),
-                    format_size(max_size)
+                    SizeFmt(size),
+                    SizeFmt(max_size)
                 );
                 false
             }
@@ -2161,7 +2168,7 @@ impl ItemThumbnail {
 pub struct Item {
     pub name: String,
     pub is_mount_point: bool,
-    pub display_name: String,
+    pub display_name: Box<str>,
     pub metadata: ItemMetadata,
     pub hidden: bool,
     pub location_opt: Option<Location>,
@@ -2181,14 +2188,16 @@ pub struct Item {
 }
 
 impl Item {
-    fn display_name(name: &str) -> String {
+    fn display_name(name: &str) -> Box<str> {
         // In order to wrap at periods and underscores, add a zero width space after each one
         static PERIOD_UNDERSCORE_AC: LazyLock<aho_corasick::AhoCorasick> = LazyLock::new(|| {
             aho_corasick::AhoCorasick::new([".", "_"])
                 .expect("Expected AhoCorasick searcher to be built successfully")
         });
 
-        PERIOD_UNDERSCORE_AC.replace_all(name, &[".\u{200B}", "_\u{200B}"])
+        PERIOD_UNDERSCORE_AC
+            .replace_all(name, &[".\u{200B}", "_\u{200B}"])
+            .into_boxed_str()
     }
 
     /// Text widget for a filename in grid/icon view: word-or-glyph wrapping, middle-ellipsized to 3 lines.
@@ -2338,9 +2347,9 @@ impl Item {
                 }
                 let size = match &self.dir_size {
                     DirSize::Calculating(_) => fl!("calculating"),
-                    DirSize::Directory(size) => format_size(*size),
+                    DirSize::Directory(size) => SizeFmt(*size).to_string(),
                     DirSize::NotDirectory => String::new(),
-                    DirSize::Error(err) => err.clone(),
+                    DirSize::Error(err) => err.to_string(),
                 };
                 if !size.is_empty() {
                     details = details.push(widget::text::body(fl!("item-size", size = size)));
@@ -2348,7 +2357,7 @@ impl Item {
             } else {
                 details = details.push(widget::text::body(fl!(
                     "item-size",
-                    size = format_size(metadata.len())
+                    size = SizeFmt(metadata.len()).to_string()
                 )));
             }
 
@@ -2492,7 +2501,7 @@ impl Item {
                 } else {
                     column = column.push(widget::text::body(format!(
                         "Size: {}",
-                        format_size(metadata.len())
+                        SizeFmt(metadata.len())
                     )));
                 }
                 if let Ok(time) = metadata.modified() {
@@ -2576,8 +2585,8 @@ impl fmt::Debug for SearchContextWrapper {
 pub struct Tab {
     //TODO: make more items private
     pub location: Location,
-    pub location_ancestors: Vec<(Location, String)>,
-    pub location_title: String,
+    pub location_ancestors: Vec<(Location, Box<str>)>,
+    pub location_title: Box<str>,
     pub location_context_menu_point: Option<Point>,
     pub location_context_menu_index: Option<usize>,
     pub context_menu: Option<Point>,
@@ -2596,7 +2605,7 @@ pub struct Tab {
     pub sort_name: HeadingOptions,
     pub sort_direction: bool,
     pub gallery: bool,
-    pub(crate) parent_item_opt: Option<Item>,
+    pub(crate) parent_item_opt: Box<Option<Item>>,
     pub(crate) items_opt: Option<Vec<Item>>,
     pub dnd_hovered: Option<(Location, Instant)>,
     pub(crate) scrollable_id: widget::Id,
@@ -2635,22 +2644,22 @@ async fn calculate_dir_size(path: &Path, controller: Controller) -> Result<u64, 
     Ok(total)
 }
 
-pub(crate) fn folder_name<P: AsRef<Path>>(path: P) -> (String, bool) {
+pub(crate) fn folder_name<P: AsRef<Path>>(path: P) -> (Box<str>, bool) {
     let path = path.as_ref();
     let mut found_home = false;
     let name = path.file_name().map_or_else(
-        || fl!("filesystem"),
+        || fl!("filesystem").into_boxed_str(),
         |name| {
             if path == crate::home_dir() {
                 found_home = true;
-                fl!("home")
+                fl!("home").into_boxed_str()
             } else {
                 match (get_filename_from_path(path), fs::metadata(path)) {
                     (Ok(name), Ok(metadata)) => {
                         let is_gvfs = fs_kind(&metadata) == FsKind::Gvfs;
                         display_name_for_file(path, &name, is_gvfs, false)
                     }
-                    _ => name.to_string_lossy().into_owned(),
+                    _ => name.to_string_lossy().into_owned().into_boxed_str(),
                 }
             }
         },
@@ -2681,21 +2690,23 @@ pub fn parse_hidden_file<P: AsRef<Path>>(path: P) -> Box<[String]> {
 
 impl Tab {
     pub fn new(
-        location: Location,
+        mut location: Location,
         config: TabConfig,
         thumb_config: ThumbCfg,
-        sorting_options: Option<&FxOrderMap<String, (HeadingOptions, bool)>>,
+        sorting_options: Option<&FxOrderMap<Box<str>, (HeadingOptions, bool)>>,
         scrollable_id: widget::Id,
         window_id: Option<window::Id>,
     ) -> Self {
-        let location_str = location.to_string();
+        let location_str = location.to_string().into_boxed_str();
         let (sort_name, sort_direction) = sorting_options
             .and_then(|opts| opts.get(&location_str))
             .or_else(|| SORT_OPTION_FALLBACK.get(&location_str))
             .copied()
             .unwrap_or((HeadingOptions::Name, true));
-        let location = location.normalize();
-        let location_ancestors = location.ancestors();
+        location.normalize_in_place();
+        let location_ancestors = location
+            .ancestors()
+            .map_or_else(Vec::new, Iterator::collect);
         let location_title = location.title();
         let history = vec![location.clone()];
         Self {
@@ -2720,7 +2731,7 @@ impl Tab {
             sort_name,
             sort_direction,
             gallery: false,
-            parent_item_opt: None,
+            parent_item_opt: Box::new(None),
             items_opt: None,
             scrollable_id,
             select_focus: None,
@@ -2738,9 +2749,8 @@ impl Tab {
         }
     }
 
-    pub fn title(&self) -> String {
-        //TODO: is it possible to return a &str?
-        self.location_title.clone()
+    pub fn title(&self) -> &str {
+        self.location_title.as_ref()
     }
 
     pub const fn items_opt(&self) -> Option<&Vec<Item>> {
@@ -3082,7 +3092,12 @@ impl Tab {
 
     pub fn change_location(&mut self, location: &Location, history_i_opt: Option<usize>) {
         self.location = location.normalize();
-        self.location_ancestors = self.location.ancestors();
+
+        self.location_ancestors.clear();
+        if let Some(ancestors) = self.location.ancestors() {
+            self.location_ancestors.extend(ancestors);
+        }
+
         self.location_title = self.location.title();
         self.context_menu = None;
         self.edit_location = None;
@@ -3159,7 +3174,7 @@ impl Tab {
                         }
                     }
                     if !paths_to_open.is_empty() {
-                        commands.push(Command::OpenFile(paths_to_open));
+                        commands.push(Command::OpenFile(paths_to_open.into_boxed_slice()));
                     }
                 }
 
@@ -3193,8 +3208,8 @@ impl Tab {
                     if let Some(location) = &clicked_item.location_opt {
                         if clicked_item.metadata.is_dir() {
                             cd = Some(location.clone());
-                        } else if let Some(path) = location.path_opt() {
-                            commands.push(Command::OpenFile(vec![path.clone()]));
+                        } else if let Some(path) = location.path_opt().cloned() {
+                            commands.push(Command::OpenFile([path].into()));
                         } else {
                             log::warn!("no path for item {clicked_item:?}");
                         }
@@ -3397,9 +3412,9 @@ impl Tab {
                             //TODO: blocking code, run in command
                             match item_from_path(&path, IconSizes::default()) {
                                 Ok(item) => {
-                                    commands.push(Command::Preview(PreviewKind::Custom(
+                                    commands.push(Command::Preview(PreviewKind::Custom(Box::new(
                                         PreviewItem(item),
-                                    )));
+                                    ))));
                                 }
                                 Err(err) => {
                                     log::warn!(
@@ -3752,7 +3767,7 @@ impl Tab {
                         if path.is_dir() {
                             cd = Some(location);
                         } else {
-                            commands.push(Command::OpenFile(vec![path.clone()]));
+                            commands.push(Command::OpenFile([path.clone()].into()));
                         }
                     }
                     _ => {
@@ -3775,7 +3790,7 @@ impl Tab {
                         if path.is_dir() {
                             cd = Some(Location::Path(path));
                         } else {
-                            commands.push(Command::OpenFile(vec![path]));
+                            commands.push(Command::OpenFile([path].into()));
                         }
                     }
                     // Open selected items
@@ -3846,7 +3861,7 @@ impl Tab {
                             }
                         }
                         if !open_files.is_empty() {
-                            commands.push(Command::OpenFile(open_files));
+                            commands.push(Command::OpenFile(open_files.into_boxed_slice()));
                         }
                     }
                 }
@@ -3861,7 +3876,7 @@ impl Tab {
                 let location = self.location.clone();
                 self.change_location(&location, None);
                 commands.push(Command::ChangeLocation(
-                    self.title(),
+                    self.title().into(),
                     location,
                     Some(selected_paths),
                 ));
@@ -3900,7 +3915,7 @@ impl Tab {
                                 //cd = Some(Location::Path(path.clone()));
                                 commands.push(Command::OpenInNewTab(path.clone()));
                             } else {
-                                commands.push(Command::OpenFile(vec![path.clone()]));
+                                commands.push(Command::OpenFile([path.clone()].into()));
                             }
                         } else {
                             log::warn!("no path for item {clicked_item:?}");
@@ -4059,7 +4074,7 @@ impl Tab {
                     self.sort_direction = dir;
                     if !matches!(self.location, Location::Desktop(..)) {
                         commands.push(Command::SetSort(
-                            self.location.normalize().to_string(),
+                            self.location.normalize().to_string().into_boxed_str(),
                             heading_option,
                             self.sort_direction,
                         ));
@@ -4135,7 +4150,7 @@ impl Tab {
 
                     if !matches!(self.location, Location::Desktop(..)) {
                         commands.push(Command::SetSort(
-                            self.location.normalize().to_string(),
+                            self.location.normalize().to_string().into_boxed_str(),
                             heading_option,
                             heading_sort,
                         ));
@@ -4154,7 +4169,7 @@ impl Tab {
                         if let Ok(entries) = fs::read_dir(&to) {
                             for i in entries.into_iter().filter_map(Result::ok) {
                                 let i = i.path();
-                                from.paths.retain(|p| &i != p);
+                                from.paths.retain(|p| i != *p);
                                 if from.paths.is_empty() {
                                     log::info!("All dropped files already in target directory.");
                                     return commands;
@@ -4164,7 +4179,7 @@ impl Tab {
                         commands.push(Command::DropFiles(to, from));
                     }
                     Location::Trash if matches!(from.kind, ClipboardKind::Cut { .. }) => {
-                        commands.push(Command::Delete(from.paths));
+                        commands.push(Command::Delete(from.paths.into_boxed_slice()));
                     }
                     _ => {
                         log::warn!("{:?} to {:?} is not supported.", from.kind, to);
@@ -4214,7 +4229,7 @@ impl Tab {
             }
             Message::DirectorySize(path, dir_size) => {
                 let location = Location::Path(path);
-                if let Some(ref mut item) = self.parent_item_opt
+                if let Some(item) = self.parent_item_opt.as_mut()
                     && item.location_opt.as_ref() == Some(&location)
                 {
                     item.dir_size.clone_from(&dir_size);
@@ -4245,7 +4260,7 @@ impl Tab {
             if matches!(self.mode, Mode::Desktop) {
                 match location {
                     Location::Path(path) => {
-                        commands.push(Command::OpenFile(vec![path]));
+                        commands.push(Command::OpenFile([path].into()));
                     }
                     Location::Trash => {
                         commands.push(Command::OpenTrash);
@@ -4259,18 +4274,18 @@ impl Tab {
                     && !path.is_dir()
                     && let Some(parent) = path.parent()
                 {
-                    selected_paths = Some(vec![path.clone()]);
+                    selected_paths = Some([path.clone()].into());
                     location = location.with_path(parent.to_path_buf());
                 }
                 if location != self.location || selected_paths.is_some() {
                     if location.path_opt().is_none_or(|path| path.is_dir()) {
                         if selected_paths.is_none() {
                             selected_paths =
-                                self.location.path_opt().map(|path| vec![path.clone()]);
+                                self.location.path_opt().map(|path| [path.clone()].into());
                         }
                         self.change_location(&location, history_i_opt);
                         commands.push(Command::ChangeLocation(
-                            self.title(),
+                            self.title().into(),
                             location,
                             selected_paths,
                         ));
@@ -4472,7 +4487,7 @@ impl Tab {
             && let Some(items) = &self.items_opt
             && let Some(item) = items.get(index)
         {
-            name_opt = Some(widget::text::heading(&item.display_name));
+            name_opt = Some(widget::text::heading(item.display_name.as_ref()));
             match item.thumbnail_opt {
                 Some(ItemThumbnail::NotImage) | None => {}
                 Some(ItemThumbnail::Image(ref handle, original_dims)) => {
@@ -4851,7 +4866,7 @@ impl Tab {
                     let (name_width, name_text) = if children.is_empty() {
                         (
                             text_width_heading(&name),
-                            widget::text::heading(name)
+                            widget::text::heading(name.into_string())
                                 .wrapping(text::Wrapping::None)
                                 .ellipsize(text::Ellipsize::End(
                                     text::EllipsizeHeightLimit::Lines(1),
@@ -4867,7 +4882,7 @@ impl Tab {
                         w += 16.0;
                         (
                             text_width_body(&name),
-                            widget::text::body(name).wrapping(text::Wrapping::None),
+                            widget::text::body(name.into_string()).wrapping(text::Wrapping::None),
                         )
                     };
 
@@ -4950,7 +4965,7 @@ impl Tab {
             }
             Location::Network(uri, display_name, path) => {
                 children.push(
-                    widget::button::custom(widget::text::heading(display_name))
+                    widget::button::custom(widget::text::heading(display_name.as_ref()))
                         .padding(space_xxxs)
                         .on_press(Message::Location(Location::Network(
                             uri.clone(),
@@ -5154,7 +5169,7 @@ impl Tab {
                         ))
                         .into(),
                         widget::tooltip(
-                            widget::button::custom(Item::grid_display_name(&item.display_name))
+                            widget::button::custom(Item::grid_display_name(item.display_name.as_ref()))
                                 .id(item.button_id.clone())
                                 .padding([0, space_xxxs])
                                 .class(button_style(
@@ -5317,7 +5332,7 @@ impl Tab {
                                 false,
                             )),
                             widget::button::custom(Item::grid_display_name(
-                                item.display_name.clone(),
+                                item.display_name.to_string(),
                             ))
                             .id(item.button_id.clone())
                             .on_press(Message::Click(Some(i)))
@@ -5477,7 +5492,7 @@ impl Tab {
                                     }
                                 })
                             } else {
-                                format_size(metadata.len())
+                                SizeFmt(metadata.len()).to_string()
                             }
                         }
                         ItemMetadata::Trash { ref metadata, .. } => match metadata.size {
@@ -5489,7 +5504,7 @@ impl Tab {
                                     format!("{entries} items")
                                 }
                             }
-                            trash::TrashItemSize::Bytes(bytes) => format_size(bytes),
+                            trash::TrashItemSize::Bytes(bytes) => SizeFmt(bytes).to_string(),
                         },
                         ItemMetadata::SimpleDir { entries } => {
                             //TODO: translate
@@ -5499,14 +5514,14 @@ impl Tab {
                                 format!("{entries} items")
                             }
                         }
-                        ItemMetadata::SimpleFile { size } => format_size(size),
+                        ItemMetadata::SimpleFile { size } => SizeFmt(size).to_string(),
                         #[cfg(feature = "gvfs")]
                         ItemMetadata::GvfsPath {
                             size_opt,
                             children_opt,
                             ..
                         } => children_opt.map_or_else(
-                            || format_size(size_opt.unwrap_or_default()),
+                            || SizeFmt(size_opt.unwrap_or_default()).to_string(),
                             |child_count| {
                                 if child_count == 1 {
                                     format!("{child_count} item")
@@ -5524,7 +5539,7 @@ impl Tab {
                                 .size(icon_size)
                                 .into(),
                             widget::column::with_children([
-                                Item::list_display_name(item.display_name.clone()).into(),
+                                Item::grid_display_name(item.display_name.to_string()).into(),
                                 //TODO: translate?
                                 widget::text::caption(format!("{modified_text} - {size_text}"))
                                     .into(),
@@ -5541,7 +5556,7 @@ impl Tab {
                                 .size(icon_size)
                                 .into(),
                             widget::column::with_children([
-                                Item::list_display_name(item.display_name.clone()).into(),
+                                Item::grid_display_name(item.display_name.to_string()).into(),
                                 widget::text::caption(
                                     item.path_opt().map_or_else(String::new, |path| {
                                         path.display().to_string()
@@ -5567,7 +5582,7 @@ impl Tab {
                                 .content_fit(ContentFit::Contain)
                                 .size(icon_size)
                                 .into(),
-                            Item::list_display_name(item.display_name.clone())
+                            Item::grid_display_name(item.display_name.to_string())
                                 .width(Length::Fill)
                                 .into(),
                             widget::text::body(modified_text.clone())
@@ -5635,7 +5650,7 @@ impl Tab {
                                     .size(icon_size)
                                     .into(),
                                 widget::column::with_children([
-                                    Item::list_display_name(item.display_name.clone()).into(),
+                                    Item::grid_display_name(item.display_name.to_string()).into(),
                                     //TODO: translate?
                                     widget::text::body(format!("{modified_text} - {size_text}"))
                                         .into(),
@@ -5652,7 +5667,7 @@ impl Tab {
                                     .size(icon_size)
                                     .into(),
                                 widget::column::with_children([
-                                    Item::list_display_name(item.display_name.clone()).into(),
+                                    Item::grid_display_name(item.display_name.to_string()).into(),
                                     widget::text::caption(
                                         item.path_opt().map_or_else(String::new, |path| {
                                             path.display().to_string()
@@ -5678,7 +5693,7 @@ impl Tab {
                                     .content_fit(ContentFit::Contain)
                                     .size(icon_size)
                                     .into(),
-                                Item::list_display_name(item.display_name.clone())
+                                Item::grid_display_name(item.display_name.to_string())
                                     .width(Length::Fill)
                                     .into(),
                                 widget::text(modified_text).width(modified_width).into(),
@@ -6001,7 +6016,7 @@ impl Tab {
                         }
                         DirSize::NotDirectory => (),
                         DirSize::Error(err) => {
-                            dir_size_error = Some(err.clone());
+                            dir_size_error = Some(err.to_string());
                         }
                     }
                 } else {
@@ -6040,7 +6055,7 @@ impl Tab {
             } else if let Some(error) = dir_size_error {
                 error
             } else {
-                format_size(total_size)
+                SizeFmt(total_size).to_string()
             }
         };
 
@@ -6220,7 +6235,9 @@ impl Tab {
                                                 );
                                                 Message::DirectorySize(
                                                     path.clone(),
-                                                    DirSize::Error(err.to_string()),
+                                                    DirSize::Error(
+                                                        err.to_string().into_boxed_str(),
+                                                    ),
                                                 )
                                             }
                                         }
@@ -6261,7 +6278,7 @@ impl Tab {
                     let last_modified_opt = Arc::new(AtomicCell::new(None));
                     output
                         .send(Message::SearchContext(
-                            location.clone(),
+                            location,
                             SearchContextWrapper(Some(SearchContext {
                                 results_rx,
                                 ready: ready.clone(),
@@ -6341,7 +6358,7 @@ impl Tab {
                                         path.display(),
                                         start.elapsed()
                                     );
-                                    Message::TabComplete(path.clone(), completions)
+                                    Message::TabComplete(path, completions)
                                 }
                                 Err(err) => {
                                     log::warn!(
@@ -6349,7 +6366,7 @@ impl Tab {
                                         path.display(),
                                         err
                                     );
-                                    Message::TabComplete(path.clone(), Vec::new())
+                                    Message::TabComplete(path, Vec::new())
                                 }
                             }
                         })
