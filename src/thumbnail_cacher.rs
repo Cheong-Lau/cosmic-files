@@ -1,8 +1,8 @@
+use anyhow::Context;
 use image::DynamicImage;
 use md5::{Digest, Md5};
 use rustc_hash::FxHashMap;
 use std::{
-    error::Error,
     fs::{self, File},
     io::{self, BufReader, BufWriter},
     os::unix::fs::PermissionsExt,
@@ -25,12 +25,11 @@ pub struct ThumbnailCacher {
 }
 
 impl ThumbnailCacher {
-    pub fn new(file_path: &Path, thumbnail_size: ThumbnailSize) -> Result<Self, String> {
-        let file_uri = thumbnail_uri(file_path)
-            .map_err(|err| format!("failed to create URI for {}: {}", file_path.display(), err))?;
-        let cache_base_dir = THUMBNAIL_CACHE_BASE_DIR
-            .as_ref()
-            .ok_or("failed to get thumbnail cache directory".to_string())?;
+    pub fn new(file_path: &Path, thumbnail_size: ThumbnailSize) -> anyhow::Result<Self> {
+        let file_uri = thumbnail_uri(file_path).context("failed to create Uri")?;
+        let Some(cache_base_dir) = THUMBNAIL_CACHE_BASE_DIR.as_ref() else {
+            anyhow::bail!("failed to get thumbnail cache directory");
+        };
         let thumbnail_filename = thumbnail_cache_filename(&file_uri);
         let thumbnail_dir = cache_base_dir.join(thumbnail_size.subdirectory_name());
         if !thumbnail_dir.is_dir() {
@@ -38,11 +37,7 @@ impl ThumbnailCacher {
                 "{} is not a directory, creating one now",
                 thumbnail_dir.display()
             );
-            let _: () = log::error!(
-                "{} failed to create directory, this error can be expected on first run",
-                thumbnail_dir.display()
-            );
-            fs::create_dir_all(&thumbnail_dir).unwrap_or(());
+            fs::create_dir_all(&thumbnail_dir)?;
         }
         let thumbnail_path = thumbnail_dir.join(&thumbnail_filename);
 
@@ -92,10 +87,7 @@ impl ThumbnailCacher {
         &self.thumbnail_dir
     }
 
-    pub fn update_with_temp_file(
-        &self,
-        temp_file: &NamedTempFile,
-    ) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_temp_file(&self, temp_file: &NamedTempFile) -> anyhow::Result<&Path> {
         fs::set_permissions(temp_file.path(), fs::Permissions::from_mode(0o600))?;
         self.update_thumbnail_text_metadata(temp_file.path())?;
         fs::rename(temp_file.path(), &self.thumbnail_path)?;
@@ -103,7 +95,7 @@ impl ThumbnailCacher {
         Ok(&self.thumbnail_path)
     }
 
-    pub fn update_with_image(&self, image: &DynamicImage) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_image(&self, image: &DynamicImage) -> anyhow::Result<&Path> {
         let temp_file = tempfile::Builder::new()
             .prefix("cosmic-files-")
             .tempfile_in(&self.thumbnail_dir)?;
@@ -127,7 +119,7 @@ impl ThumbnailCacher {
         self.update_with_temp_file(&temp_file)
     }
 
-    pub fn create_fail_marker(&self) -> Result<(), Box<dyn Error>> {
+    pub fn create_fail_marker(&self) -> anyhow::Result<()> {
         if let Some(dir) = self.thumbnail_fail_marker_path.parent() {
             fs::create_dir_all(dir)?;
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
@@ -142,7 +134,7 @@ impl ThumbnailCacher {
         self.update_thumbnail_text_metadata(&self.thumbnail_fail_marker_path)
     }
 
-    fn update_thumbnail_text_metadata(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+    fn update_thumbnail_text_metadata(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
 
@@ -164,12 +156,11 @@ impl ThumbnailCacher {
             )
         };
 
-        let mut image_data = vec![
-            0;
-            reader
-                .output_buffer_size()
-                .ok_or("The required image buffer size is too large.")?
-        ];
+        let Some(image_data_size) = reader.output_buffer_size() else {
+            anyhow::bail!("The required image buffer size is too large.")
+        };
+
+        let mut image_data = vec![0; image_data_size];
         reader.next_frame(&mut image_data)?;
 
         let file = File::create(path)?;
@@ -286,12 +277,8 @@ impl ThumbnailCacher {
 
 fn thumbnail_uri(path: &Path) -> io::Result<String> {
     let absolute_path = fs::canonicalize(path)?;
-    let url = Url::from_file_path(&absolute_path).map_err(|()| {
-        io::Error::other(format!(
-            "failed to create URI for thumbnail_file: {}",
-            absolute_path.display()
-        ))
-    })?;
+    let url = Url::from_file_path(&absolute_path)
+        .expect("Url::from_file_path should not error on an absolute path");
     // Technically braces don't need to be percent encoded,
     // and they aren't by the url crate, but the thumbnailer used by
     // Gnome Files does. In order to share thumbnails and not get duplicates
