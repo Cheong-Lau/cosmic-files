@@ -33,6 +33,60 @@ pub const DECIMAL_MB_TO_BYTES: u64 = 1000 * 1000;
 /// quality and memory usage and also prevets re-decoding on small windows size adjustments.
 const DISPLAY_SCALE_FACTOR: f32 = 1.5;
 
+#[derive(Debug)]
+pub enum ImageReadError {
+    ImageTooLarge { width: u32, height: u32 },
+    ZeroDimension { width: u32, height: u32 },
+    InsufficientMemory { mb_needed: u64, mb_available: u64 },
+    IoError(std::io::Error),
+    ImageError(image::ImageError),
+}
+
+impl std::fmt::Display for ImageReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ImageTooLarge { width, height } => {
+                write!(
+                    f,
+                    "Image dimensions too large: {width}x{height} causes overflow in memory calculation"
+                )
+            }
+            Self::ZeroDimension { width, height } => {
+                write!(
+                    f,
+                    "Invalid image dimensions: {width}x{height} (zero dimension)"
+                )
+            }
+            Self::InsufficientMemory {
+                mb_needed,
+                mb_available,
+            } => {
+                write!(
+                    f,
+                    "Insufficient memory: need {}MB, available {}MB. Try closing other applications.",
+                    mb_needed, mb_available,
+                )
+            }
+            Self::IoError(e) => write!(f, "Could not read image: {e}"),
+            Self::ImageError(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ImageReadError {}
+
+impl From<std::io::Error> for ImageReadError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IoError(value)
+    }
+}
+
+impl From<image::ImageError> for ImageReadError {
+    fn from(value: image::ImageError) -> Self {
+        Self::ImageError(value)
+    }
+}
+
 /// Calculate optimal target dimensions for decoding based on display size.
 /// Returns None if no resizing is needed (image is smaller than display).
 ///
@@ -155,28 +209,8 @@ pub fn should_use_dedicated_worker(
 }
 
 /// Get the dimensions of an image without fully decoding it
-pub fn get_image_dimensions(path: &Path) -> Option<(u32, u32)> {
-    match ImageReader::open(path) {
-        Ok(reader) => match reader.into_dimensions() {
-            Ok((width, height)) => {
-                log::debug!(
-                    "Image dimensions: {}x{} for {}",
-                    width,
-                    height,
-                    path.display()
-                );
-                Some((width, height))
-            }
-            Err(e) => {
-                log::warn!("Failed to get dimensions for {}: {}", path.display(), e);
-                None
-            }
-        },
-        Err(e) => {
-            log::warn!("Failed to open image reader for {}: {}", path.display(), e);
-            None
-        }
-    }
+pub fn get_image_dimensions(path: &Path) -> Result<(u32, u32), ImageReadError> {
+    Ok(ImageReader::open(path)?.into_dimensions()?)
 }
 
 /// Calculate the memory required to decode an image in bytes.
@@ -189,16 +223,13 @@ fn calculate_image_memory(width: u32, height: u32) -> Option<u64> {
 /// Check if there's sufficient system RAM to decode an image (Linux only).
 /// Returns: (has_memory, error_message)
 #[cfg(target_os = "linux")]
-fn check_ram_available(width: u32, height: u32) -> (bool, Option<String>) {
+fn check_ram_available(width: u32, height: u32) -> Result<bool, ImageReadError> {
     use procfs::Current;
 
     let Some(bytes_needed) = calculate_image_memory(width, height) else {
-        let error_msg = format!(
-            "Image dimensions too large: {}x{} causes overflow in memory calculation",
-            width, height
-        );
-        log::error!("{}", error_msg);
-        return (false, Some(error_msg));
+        let error = ImageReadError::ImageTooLarge { width, height };
+        log::error!("{}", error);
+        return Err(error);
     };
 
     let mb_needed = bytes_needed / MB_TO_BYTES;
@@ -215,39 +246,32 @@ fn check_ram_available(width: u32, height: u32) -> (bool, Option<String>) {
             let usable_bytes = available_bytes.saturating_sub(min_reserve_bytes);
 
             if bytes_needed > usable_bytes {
-                let available_mb = available_bytes / MB_TO_BYTES;
-                let error_msg = format!(
-                    "Insufficient memory: need {}MB, available {}MB. Try closing other applications.",
-                    mb_needed, available_mb
-                );
-                log::warn!("{}", error_msg);
-                return (false, Some(error_msg));
+                let mb_available = available_bytes / MB_TO_BYTES;
+                return Err(ImageReadError::InsufficientMemory {
+                    mb_needed,
+                    mb_available,
+                });
             }
 
-            (true, None)
+            Ok(true)
         }
         Err(e) => {
             log::warn!("Failed to read /proc/meminfo: {}. Skipping RAM check.", e);
             // Graceful fallback: assume RAM is available
-            (true, None)
+            Ok(true)
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn check_ram_available(_width: u32, _height: u32) -> (bool, Option<String>) {
+fn check_ram_available(_width: u32, _height: u32) -> Result<bool, ImageReadError> {
     // RAM checking not implemented for this platform
-    (true, None)
+    Ok(true)
 }
 
-pub fn check_memory_available(width: u32, height: u32) -> (bool, Option<String>) {
+pub fn check_memory_available(width: u32, height: u32) -> Result<bool, ImageReadError> {
     if width == 0 || height == 0 {
-        let error_msg = format!(
-            "Invalid image dimensions: {}x{} (zero dimension)",
-            width, height
-        );
-        log::error!("{}", error_msg);
-        return (false, Some(error_msg));
+        return Err(ImageReadError::ZeroDimension { width, height });
     }
 
     // Check system RAM availability
@@ -262,87 +286,70 @@ pub fn check_memory_available(width: u32, height: u32) -> (bool, Option<String>)
 pub async fn decode_large_image(
     path: PathBuf,
     target_dimensions: Option<(u32, u32)>,
-) -> Option<(PathBuf, u32, u32, Vec<u8>)> {
+) -> Result<(PathBuf, u32, u32, Vec<u8>), ImageReadError> {
     // Decode image in blocking thread pool (CPU-intensive work should not block)
     tokio::task::spawn_blocking(move || {
         log::info!("Starting async decode of {}", path.display());
 
         // Use ImageReader with explicit memory limits to avoid "Memory limit exceeded" errors
         // Gallery mode uses the full memory budget since only one image decodes at a time
-        match ImageReader::open(&path).and_then(ImageReader::with_guessed_format) {
-            Ok(mut reader) => {
-                // Note: image crate uses decimal MB (1000^2), not binary MB (1024^2)
-                let mut limits = image::Limits::default();
-                limits.max_alloc = Some(GALLERY_MEMORY_LIMIT_MB * DECIMAL_MB_TO_BYTES);
-                reader.limits(limits);
+        let mut reader = ImageReader::open(&path)?.with_guessed_format()?;
+        // Note: image crate uses decimal MB (1000^2), not binary MB (1024^2)
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(GALLERY_MEMORY_LIMIT_MB * DECIMAL_MB_TO_BYTES);
+        reader.limits(limits);
 
-                match reader.decode() {
-                    Ok(img) => {
-                        let rgba = img.into_rgba8();
-                        let orig_width = rgba.width();
-                        let orig_height = rgba.height();
+        let img = reader.decode()?;
+        let rgba = img.into_rgba8();
+        let orig_width = rgba.width();
+        let orig_height = rgba.height();
 
-                        // Resize if target dimensions provided
-                        let (final_img, width, height) = if let Some((target_w, target_h)) =
-                            target_dimensions
-                        {
-                            log::info!(
-                                "Resizing {}x{} -> {}x{} for memory optimization: {}",
-                                orig_width,
-                                orig_height,
-                                target_w,
-                                target_h,
-                                path.display()
-                            );
+        // Resize if target dimensions provided
+        let (final_img, width, height) = if let Some((target_w, target_h)) = target_dimensions {
+            log::info!(
+                "Resizing {}x{} -> {}x{} for memory optimization: {}",
+                orig_width,
+                orig_height,
+                target_w,
+                target_h,
+                path.display()
+            );
 
-                            // Use Lanczos3 for high-quality downsampling
-                            let resized = image::imageops::resize(
-                                &rgba,
-                                target_w,
-                                target_h,
-                                image::imageops::FilterType::Lanczos3,
-                            );
+            // Use Lanczos3 for high-quality downsampling
+            let resized = image::imageops::resize(
+                &rgba,
+                target_w,
+                target_h,
+                image::imageops::FilterType::Lanczos3,
+            );
 
-                            let resized_w = resized.width();
-                            let resized_h = resized.height();
+            let resized_w = resized.width();
+            let resized_h = resized.height();
 
-                            log::info!(
-                                "Resize complete: {}x{} image now uses ~{} MB instead of ~{} MB",
-                                resized_w,
-                                resized_h,
-                                (resized_w as u64 * resized_h as u64 * 4) / MB_TO_BYTES,
-                                (orig_width as u64 * orig_height as u64 * 4) / MB_TO_BYTES
-                            );
+            log::info!(
+                "Resize complete: {}x{} image now uses ~{} MB instead of ~{} MB",
+                resized_w,
+                resized_h,
+                (resized_w as u64 * resized_h as u64 * 4) / MB_TO_BYTES,
+                (orig_width as u64 * orig_height as u64 * 4) / MB_TO_BYTES
+            );
 
-                            (resized, resized_w, resized_h)
-                        } else {
-                            log::info!(
-                                "Decoded {}x{} image at full resolution: {}",
-                                orig_width,
-                                orig_height,
-                                path.display()
-                            );
-                            (rgba, orig_width, orig_height)
-                        };
+            (resized, resized_w, resized_h)
+        } else {
+            log::info!(
+                "Decoded {}x{} image at full resolution: {}",
+                orig_width,
+                orig_height,
+                path.display()
+            );
+            (rgba, orig_width, orig_height)
+        };
 
-                        let pixels = final_img.into_raw();
-                        Some((path, width, height, pixels))
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to decode {}: {}", path.display(), e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to open {}: {}", path.display(), e);
-                None
-            }
-        }
+        let pixels = final_img.into_raw();
+        Ok((path, width, height, pixels))
     })
     .await
-    .ok()
-    .flatten()
+    .unwrap()
 }
 
 /// Manages state and operations for large image decoding in gallery mode
@@ -355,7 +362,7 @@ pub struct LargeImageManager {
     /// Display dimensions used for each decoded image (for resize detection)
     decoded_display_sizes: FxHashMap<PathBuf, (u32, u32)>,
     /// Errors encountered during decoding
-    decode_errors: FxHashMap<PathBuf, String>,
+    decode_errors: FxHashMap<PathBuf, ImageReadError>,
     /// Generation counter for each decode to support cancellation.
     /// When a new decode is started for the same path, the generation is incremented.
     /// Only decodes matching the current generation are accepted when they complete.
@@ -375,7 +382,7 @@ impl LargeImageManager {
         self.decoded_images.get(path)
     }
 
-    pub fn get_error(&self, path: &Path) -> Option<&String> {
+    pub fn get_error(&self, path: &Path) -> Option<&ImageReadError> {
         self.decode_errors.get(path)
     }
 
@@ -415,7 +422,7 @@ impl LargeImageManager {
         true
     }
 
-    pub fn store_error(&mut self, path: PathBuf, error: String) {
+    pub fn store_error(&mut self, path: PathBuf, error: ImageReadError) {
         self.decode_errors.insert(path.clone(), error);
         self.decoding_images.remove(&path);
     }
@@ -513,9 +520,12 @@ impl LargeImageManager {
             return (false, None, generation);
         }
 
-        let Some((width, height)) = get_image_dimensions(path) else {
-            self.store_error(path.clone(), "Failed to read image dimensions".to_string());
-            return (false, None, 0);
+        let (width, height) = match get_image_dimensions(path) {
+            Ok((width, height)) => (width, height),
+            Err(e) => {
+                self.store_error(path.clone(), e);
+                return (false, None, 0);
+            }
         };
 
         let target_dimensions = if let Some((display_w, display_h)) = display_dimensions {
@@ -554,20 +564,20 @@ impl LargeImageManager {
     /// Check if sufficient memory is available, clearing cache if needed.
     /// Returns true if memory is available, false otherwise.
     fn ensure_memory_available(&mut self, path: &PathBuf, width: u32, height: u32) -> bool {
-        let (has_memory, error_opt) = check_memory_available(width, height);
-
-        if has_memory {
-            return true;
+        match check_memory_available(width, height) {
+            Ok(true) => return true,
+            Ok(false) => (),
+            Err(e) => {
+                log::warn!("Error while checking memory: {e}");
+                self.store_error(path.clone(), e);
+            }
         }
 
         if self.cache_is_empty() {
-            if let Some(error_msg) = error_opt {
-                self.store_error(path.clone(), error_msg);
-                log::warn!(
-                    "Cannot load {}: insufficient memory and cache is empty",
-                    path.display()
-                );
-            }
+            log::warn!(
+                "Cannot load {}: insufficient memory and cache is empty",
+                path.display()
+            );
             return false;
         }
 
@@ -577,20 +587,22 @@ impl LargeImageManager {
         );
         self.clear_cache();
 
-        let (has_memory_after_clear, error_opt_after) = check_memory_available(width, height);
-
-        if has_memory_after_clear {
-            log::info!("Memory available after cache clear, proceeding with decode");
-            return true;
+        match check_memory_available(width, height) {
+            Ok(true) => {
+                log::info!("Memory available after cache clear, proceeding with decode");
+                return true;
+            }
+            Ok(false) => (),
+            Err(e) => {
+                log::warn!("Error while checking memory: {e}");
+                self.store_error(path.clone(), e);
+            }
         }
 
-        if let Some(error_msg) = error_opt_after {
-            self.store_error(path.clone(), error_msg);
-            log::warn!(
-                "Cannot load {}: insufficient memory even after cache clear",
-                path.display()
-            );
-        }
+        log::warn!(
+            "Cannot load {}: insufficient memory even after cache clear",
+            path.display()
+        );
         false
     }
 }
