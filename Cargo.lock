@@ -1491,6 +1491,7 @@ dependencies = [
  "tar",
  "tempfile",
  "test-log",
+ "thiserror 2.0.18",
  "tikv-jemallocator",
  "tokio",
  "trash",

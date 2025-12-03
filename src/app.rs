@@ -82,7 +82,7 @@ use crate::{
         TimeConfig, TypeToSearch,
     },
     dialog::{Dialog, DialogKind, DialogMessage, DialogResult, DialogSettings},
-    fl, home_dir,
+    err_str, fl, home_dir,
     key_bind::key_binds,
     localize::LANGUAGE_SORTER,
     menu,
@@ -926,7 +926,7 @@ impl App {
                         } else {
                             format!("{paths:?}")
                         };
-                        log::warn!("failed to open {:?} with {:?}: {}", path, app.id, err);
+                        log::warn!("failed to open {} with {}: {}", path, app.id, err);
                     }
                 }
             }
@@ -2102,7 +2102,7 @@ impl App {
                         }
                     }
                     Err(err) => {
-                        log::warn!("failed to update favorites after moving directories: {err:?}");
+                        log::warn!("failed to update favorites after moving directories: {err}");
                     }
                 }
             } else {
@@ -2424,10 +2424,14 @@ impl Application for App {
                         })
                         && let Some(mounter) = MOUNTERS.get(&key)
                     {
-                        return mounter.network_drive(uri.clone()).map(move |()| {
-                            cosmic::Action::App(Message::NetworkDriveOpenEntityAfterMount {
-                                entity,
-                            })
+                        return mounter.network_drive(uri.clone()).map(move |res| {
+                            if res.is_ok() {
+                                cosmic::Action::App(Message::NetworkDriveOpenEntityAfterMount {
+                                    entity,
+                                })
+                            } else {
+                                cosmic::action::none()
+                            }
                         });
                     }
 
@@ -2489,7 +2493,7 @@ impl Application for App {
         {
             return mounter
                 .mount(data.1.clone())
-                .map(|()| cosmic::action::none());
+                .map(|_res| cosmic::action::none());
         }
         Task::none()
     }
@@ -2883,7 +2887,7 @@ impl Application for App {
                             mounter_key, item, ..
                         } => {
                             if let Some(mounter) = MOUNTERS.get(&mounter_key) {
-                                tasks.push(mounter.mount(item).map(|()| cosmic::action::none()));
+                                tasks.push(mounter.mount(item).map(|_res| cosmic::action::none()));
                             }
                         }
                         DialogPage::NetworkAuth { auth, auth_tx, .. } => {
@@ -2933,7 +2937,7 @@ impl Application for App {
                                         }
                                         Err(err) => {
                                             log::warn!(
-                                                "failed to open {} with {:?}: {}",
+                                                "failed to open {} with {}: {}",
                                                 path.display(),
                                                 app.id,
                                                 err
@@ -2942,7 +2946,7 @@ impl Application for App {
                                     }
                                 } else {
                                     log::warn!(
-                                        "failed to open {} with {:?}: failed to get command",
+                                        "failed to open {} with {}: failed to get command",
                                         path.display(),
                                         app.id
                                     );
@@ -3278,11 +3282,11 @@ impl Application for App {
                     self.network_drive_connecting =
                         Some((mounter_key, self.network_drive_input.clone()));
                     return mounter
-                        .network_drive(self.network_drive_input.clone())
-                        .map(|()| cosmic::action::none());
+                        .network_drive(self.network_drive_input.to_string())
+                        .map(|_res| cosmic::action::none());
                 }
                 log::warn!(
-                    "no mounter found for connecting to {:?}",
+                    "no mounter found for connecting to {}",
                     self.network_drive_input
                 );
             }
@@ -3296,16 +3300,16 @@ impl Application for App {
                 }
                 match res {
                     Ok(true) => {
-                        log::info!("connected to {uri:?}");
+                        log::info!("connected to {uri}");
                         if matches!(self.context_page, ContextPage::NetworkDrive) {
                             self.set_show_context(false);
                         }
                     }
                     Ok(false) => {
-                        log::info!("cancelled connection to {uri:?}");
+                        log::info!("cancelled connection to {uri}");
                     }
                     Err(error) => {
-                        log::warn!("failed to connect to {uri:?}: {error}");
+                        log::warn!("failed to connect to {uri}: {error}");
                         return self.dialog_pages.push_back(DialogPage::NetworkError {
                             mounter_key,
                             uri,
@@ -3439,14 +3443,14 @@ impl Application for App {
                             command.current_dir(path);
                             if let Err(err) = spawn_detached(&mut command) {
                                 log::warn!(
-                                    "failed to open {} with terminal {:?}: {}",
+                                    "failed to open {} with terminal {}: {}",
                                     path.display(),
                                     terminal.id,
                                     err
                                 );
                             }
                         } else {
-                            log::warn!("failed to get command for {:?}", terminal.id);
+                            log::warn!("failed to get command for {}", terminal.id);
                         }
                     }
                 }
@@ -3499,11 +3503,11 @@ impl Application for App {
                         app.command(&[&url]).and_then(|v| v.into_iter().next())
                     {
                         if let Err(err) = spawn_detached(&mut command) {
-                            log::warn!("failed to open {:?} with {:?}: {}", url, app.id, err);
+                            log::warn!("failed to open {} with {}: {}", url, app.id, err);
                         }
                     } else {
                         log::warn!(
-                            "failed to open {:?} with {:?}: failed to get command",
+                            "failed to open {} with {}: failed to get command",
                             url,
                             app.id
                         );
@@ -4938,7 +4942,7 @@ impl Application for App {
                             &self.state.sort_names,
                         )
                 {
-                    log::warn!("Failed to save sort names: {err:?}");
+                    log::warn!("Failed to save sort names: {err}");
                 }
             }
             Message::NetworkDriveOpenEntityAfterMount { entity } => {
@@ -6167,7 +6171,7 @@ impl Application for App {
                                                 Ok(()) => {}
                                                 Err(err) => {
                                                     log::warn!(
-                                                        "failed to send notify events: {err:?}"
+                                                        "failed to send notify events: {err}"
                                                     );
                                                 }
                                             }
@@ -6191,12 +6195,12 @@ impl Application for App {
                             {
                                 Ok(()) => {}
                                 Err(err) => {
-                                    log::warn!("failed to send notify watcher: {err:?}");
+                                    log::warn!("failed to send notify watcher: {err}");
                                 }
                             }
                         }
                         Err(err) => {
-                            log::warn!("failed to create file watcher: {err:?}");
+                            log::warn!("failed to create file watcher: {err}");
                         }
                     }
 
@@ -6224,7 +6228,7 @@ impl Application for App {
                                     )
                                 {
                                     log::warn!(
-                                        "trash needs to be rescanned but sending message failed: {e:?}"
+                                        "trash needs to be rescanned but sending message failed: {e}"
                                     );
                                 }
                             }
@@ -6254,7 +6258,7 @@ impl Application for App {
                                     watcher.watch(&path, notify::RecursiveMode::NonRecursive)
                                 {
                                     log::warn!(
-                                        "failed to add trash bin `{}` to watcher: {:?}",
+                                        "failed to add trash bin `{}` to watcher: {}",
                                         path.display(),
                                         e
                                     );
@@ -6268,7 +6272,7 @@ impl Application for App {
                             log::warn!("failed to create new watcher for trash bin: {e:?}");
                         }
                         (_, Err(e)) => {
-                            log::warn!("could not find any valid trash bins to watch: {e:?}");
+                            log::warn!("could not find any valid trash bins to watch: {e}");
                         }
                     }
 
@@ -6308,7 +6312,7 @@ impl Application for App {
                                     futures::executor::block_on(output.send(Message::RescanRecents))
                                 {
                                     log::warn!(
-                                        "open recents tabs need to be updated but sending message failed: {e:?}"
+                                        "open recents tabs need to be updated but sending message failed: {e}"
                                     );
                                 }
                             }
@@ -6334,7 +6338,7 @@ impl Application for App {
                             std::future::pending().await
                         }
                         Err(e) => {
-                            log::warn!("failed to create new watcher for recents file: {e:?}")
+                            log::warn!("failed to create new watcher for recents file: {e}")
                         }
                     }
 
@@ -6357,12 +6361,14 @@ impl Application for App {
                 .with(key)
                 .map(|(key, mounter_message)| match mounter_message {
                     MounterMessage::Items(items) => Message::MounterItems(key, items),
-                    MounterMessage::MountResult(item, res) => Message::MountResult(key, item, res),
+                    MounterMessage::MountResult(item, res) => {
+                        Message::MountResult(key, item, err_str(res))
+                    }
                     MounterMessage::NetworkAuth(uri, auth, auth_tx) => {
                         Message::NetworkAuth(key, uri, auth, auth_tx)
                     }
                     MounterMessage::NetworkResult(uri, res) => {
-                        Message::NetworkResult(key, uri, res)
+                        Message::NetworkResult(key, uri, err_str(res))
                     }
                 })
         }));
