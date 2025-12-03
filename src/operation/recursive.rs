@@ -1,10 +1,11 @@
+use anyhow::anyhow;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 use compio::io::{AsyncReadAt, AsyncWriteAt};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
-use std::{cell::Cell, error::Error, fs, ops::ControlFlow, path::PathBuf, rc::Rc};
+use std::{cell::Cell, fs, ops::ControlFlow, path::PathBuf, rc::Rc};
 use walkdir::WalkDir;
 
 use crate::operation::{OperationError, sync_to_disk};
@@ -231,7 +232,7 @@ impl Context {
         self
     }
 
-    async fn replace(&mut self, op: &Op) -> Result<ControlFlow<bool, PathBuf>, Box<dyn Error>> {
+    async fn replace(&mut self, op: &Op) -> anyhow::Result<ControlFlow<bool, PathBuf>> {
         let replace_result = match self.replace_result_opt {
             Some(result) => result,
             None => (self.on_replace)(op, self.remaining_conflicts).await,
@@ -247,7 +248,7 @@ impl Context {
             }
             ReplaceResult::KeepBoth => match op.to.parent() {
                 Some(to_parent) => Ok(ControlFlow::Continue(copy_unique_path(&op.from, to_parent))),
-                None => Err(format!("failed to get parent of {}", op.to.display()).into()),
+                None => Err(anyhow!("failed to get parent of {}", op.to.display())),
             },
             ReplaceResult::Skip(apply_to_all) => {
                 if apply_to_all {
@@ -313,11 +314,7 @@ impl Op {
         })
     }
 
-    async fn run(
-        &mut self,
-        ctx: &mut Context,
-        mut progress: Progress,
-    ) -> Result<bool, Box<dyn Error>> {
+    async fn run(&mut self, ctx: &mut Context, mut progress: Progress) -> anyhow::Result<bool> {
         if self.skipped.normal.get() || (self.is_cleanup && self.skipped.cleanup.get()) {
             return Ok(true);
         }
