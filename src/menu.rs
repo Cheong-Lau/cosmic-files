@@ -15,7 +15,7 @@ use cosmic::{
     },
 };
 use i18n_embed::LanguageLoader;
-use mime_guess::Mime;
+use rustc_hash::FxHashSet;
 use std::{collections::HashMap, sync::LazyLock};
 
 use crate::{
@@ -34,7 +34,7 @@ macro_rules! menu_button {
             Row::with_children(
                 [$(Element::from($x)),+]
             )
-            .height(Length::Fixed(24.0))
+            .height(24.0)
             .align_y(Alignment::Center)
         )
         .padding([theme::active().cosmic().spacing.space_xxs, 16])
@@ -55,19 +55,17 @@ const fn menu_button_optional(
     }
 }
 
-pub fn context_menu<'a>(
+pub fn context_menu(
     tab: &Tab,
     key_binds: &HashMap<KeyBind, Action>,
-    modifiers: &Modifiers,
+    modifiers: Modifiers,
     clipboard_paste_available: bool,
-) -> Element<'a, tab::Message> {
+) -> Element<'static, tab::Message> {
     let find_key = |action: &Action| -> String {
-        for (key_bind, key_action) in key_binds {
-            if action == key_action {
-                return key_bind.to_string();
-            }
-        }
-        String::new()
+        key_binds
+            .iter()
+            .find(|&(_, key_action)| *action == *key_action)
+            .map_or_else(String::new, |(key_bind, _)| key_bind.to_string())
     };
     fn key_style(theme: &cosmic::Theme) -> TextStyle {
         let mut color = theme.cosmic().background.component.on;
@@ -107,53 +105,44 @@ pub fn context_menu<'a>(
     let can_paste = clipboard_paste_available && tab.location.supports_paste();
 
     let (sort_name, sort_direction, _) = tab.sort_options();
-    let sort_item = |label, variant| {
-        menu_item(
-            format!(
-                "{} {}",
-                label,
-                match (sort_name == variant, sort_direction) {
-                    (true, true) => "\u{2B07}",
-                    (true, false) => "\u{2B06}",
-                    _ => "",
-                }
-            ),
-            Action::ToggleSort(variant),
-        )
-        .into()
+    let sort_item = |mut label: String, variant| {
+        label.push_str(match (sort_name == variant, sort_direction) {
+            (true, true) => " \u{2B07}",
+            (true, false) => " \u{2B06}",
+            _ => " ",
+        });
+        menu_item(label, Action::ToggleSort(variant))
     };
 
     let mut selected_dir = 0;
     let mut selected = 0;
     let mut selected_trash_only = false;
     let mut selected_desktop_entry = None;
-    let mut selected_types: Vec<Mime> = vec![];
+    let mut selected_types = FxHashSet::default();
     let mut selected_mount_point = 0;
     if let Some(items) = tab.items_opt() {
-        for item in items {
-            if item.selected {
-                selected += 1;
-                if item.metadata.is_dir() {
-                    selected_mount_point += i32::from(item.is_mount_point);
-                    selected_dir += 1;
-                }
-                match &item.location_opt {
-                    Some(Location::Trash) => selected_trash_only = true,
-                    Some(Location::Path(path)) => {
-                        if selected == 1
-                            && path.extension().and_then(|s| s.to_str()) == Some("desktop")
-                        {
-                            selected_desktop_entry = Some(&**path);
-                        }
-                    }
-                    _ => (),
-                }
-                selected_types.push(item.mime.clone());
+        for item in items.iter().filter(|&item| item.selected) {
+            selected += 1;
+            if item.metadata.is_dir() {
+                selected_mount_point += i32::from(item.is_mount_point);
+                selected_dir += 1;
             }
+            match &item.location_opt {
+                Some(Location::Trash) => selected_trash_only = true,
+                Some(Location::Path(path)) => {
+                    if selected == 1
+                        && path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("desktop"))
+                    {
+                        selected_desktop_entry = Some(path);
+                    }
+                }
+                _ => (),
+            }
+            selected_types.insert(&item.mime);
         }
     }
-    selected_types.sort_unstable();
-    selected_types.dedup();
     selected_trash_only = selected_trash_only && selected == 1;
     // Parse the desktop entry if it is the only selection
     #[cfg(feature = "desktop")]
@@ -168,7 +157,7 @@ pub fn context_menu<'a>(
         }
     });
 
-    let mut children: Vec<Element<_>> = Vec::new();
+    let mut column = column();
     match (&tab.mode, &tab.location) {
         (
             tab::Mode::App | tab::Mode::Desktop,
@@ -179,142 +168,159 @@ pub fn context_menu<'a>(
             | Location::Network(_, _, Some(_)),
         ) => {
             if selected_trash_only {
-                children.push(menu_item(fl!("open"), Action::Open).into());
-                if !trash::os_limited::is_empty().unwrap_or(true) {
-                    children.push(menu_item(fl!("empty-trash"), Action::EmptyTrash).into());
+                column = column.push(menu_item(fl!("open"), Action::Open));
+                if matches!(trash::os_limited::is_empty(), Ok(false)) {
+                    column = column.push(menu_item(fl!("empty-trash"), Action::EmptyTrash));
                 }
             } else if let Some(entry) = selected_desktop_entry {
-                children.push(menu_item(fl!("open"), Action::Open).into());
+                column = column.push(menu_item(fl!("open"), Action::Open));
                 #[cfg(feature = "desktop")]
                 {
-                    children.extend(entry.desktop_actions.into_iter().enumerate().map(
+                    column = column.extend(entry.desktop_actions.into_iter().enumerate().map(
                         |(i, action)| menu_item(action.name, Action::ExecEntryAction(i)).into(),
                     ));
                 }
-                children.push(divider::horizontal::light().into());
-                children.push(menu_item(fl!("rename"), Action::Rename).into());
-                children.push(menu_item(fl!("cut"), Action::Cut).into());
-                if modifiers.shift() && !modifiers.control() {
-                    children.push(menu_item(fl!("copy-path"), Action::CopyPath).into());
-                } else {
-                    children.push(menu_item(fl!("copy"), Action::Copy).into());
-                }
-                // Should this simply bypass trash and remove the shortcut?
-                children.push(menu_item(fl!("move-to-trash"), Action::Delete).into());
+                column = column
+                    .push(divider::horizontal::light())
+                    .push(menu_item(fl!("rename"), Action::Rename))
+                    .push(menu_item(fl!("cut"), Action::Cut))
+                    .push(if modifiers.shift() && !modifiers.control() {
+                        menu_item(fl!("copy-path"), Action::CopyPath)
+                    } else {
+                        menu_item(fl!("copy"), Action::Copy)
+                    })
+                    // Should this simply bypass trash and remove the shortcut?
+                    .push(menu_item(fl!("move-to-trash"), Action::Delete));
             } else if selected > 0 {
                 if selected_dir == 1 && selected == 1 || selected_dir == 0 {
-                    children.push(menu_item(fl!("open"), Action::Open).into());
+                    column = column.push(menu_item(fl!("open"), Action::Open));
                 }
                 if selected == 1 {
-                    children.push(menu_item(fl!("menu-open-with"), Action::OpenWith).into());
+                    column = column.push(menu_item(fl!("menu-open-with"), Action::OpenWith));
                     if selected_dir == 1 {
-                        children
-                            .push(menu_item(fl!("open-in-terminal"), Action::OpenTerminal).into());
+                        column =
+                            column.push(menu_item(fl!("open-in-terminal"), Action::OpenTerminal));
                     }
                 }
                 if matches!(tab.location, Location::Search(..) | Location::Recents) {
-                    children.push(
-                        menu_item(fl!("open-item-location"), Action::OpenItemLocation).into(),
-                    );
+                    column = column.push(menu_item(
+                        fl!("open-item-location"),
+                        Action::OpenItemLocation,
+                    ));
                 }
                 // All selected items are directories
                 if selected == selected_dir && matches!(tab.mode, tab::Mode::App) {
-                    children.push(menu_item(fl!("open-in-new-tab"), Action::OpenInNewTab).into());
-                    children
-                        .push(menu_item(fl!("open-in-new-window"), Action::OpenInNewWindow).into());
+                    column = column
+                        .push(menu_item(fl!("open-in-new-tab"), Action::OpenInNewTab))
+                        .push(menu_item(
+                            fl!("open-in-new-window"),
+                            Action::OpenInNewWindow,
+                        ));
                 }
-                children.push(divider::horizontal::light().into());
+                column = column.push(divider::horizontal::light());
                 if selected_mount_point == 0 {
-                    children.push(menu_item(fl!("rename"), Action::Rename).into());
-                    children.push(menu_item(fl!("cut"), Action::Cut).into());
+                    column = column
+                        .push(menu_item(fl!("rename"), Action::Rename))
+                        .push(menu_item(fl!("cut"), Action::Cut));
                 }
-                if modifiers.shift() && !modifiers.control() {
-                    children.push(menu_item(fl!("copy-path"), Action::CopyPath).into());
+                column = column.push(if modifiers.shift() && !modifiers.control() {
+                    menu_item(fl!("copy-path"), Action::CopyPath)
                 } else {
-                    children.push(menu_item(fl!("copy"), Action::Copy).into());
-                }
+                    menu_item(fl!("copy"), Action::Copy)
+                });
                 if selected_mount_point == 0 {
-                    children.push(menu_item(fl!("move-to"), Action::MoveTo).into());
+                    column = column.push(menu_item(fl!("move-to"), Action::MoveTo));
                 }
-                children.push(menu_item(fl!("copy-to"), Action::CopyTo).into());
+                column = column.push(menu_item(fl!("copy-to"), Action::CopyTo));
 
-                children.push(divider::horizontal::light().into());
+                column = column.push(divider::horizontal::light());
                 let supported_archive_types = crate::archive::SUPPORTED_ARCHIVE_TYPES;
-                selected_types.retain(|t| supported_archive_types.iter().copied().all(|m| *t != m));
+                selected_types.retain(|&t| supported_archive_types.iter().all(|&m| *t != m));
                 if selected_types.is_empty() {
-                    children.push(menu_item(fl!("extract-here"), Action::ExtractHere).into());
-                    children.push(menu_item(fl!("extract-to"), Action::ExtractTo).into());
+                    column = column
+                        .push(menu_item(fl!("extract-here"), Action::ExtractHere))
+                        .push(menu_item(fl!("extract-to"), Action::ExtractTo));
                 }
-                children.push(menu_item(fl!("compress"), Action::Compress).into());
-                children.push(divider::horizontal::light().into());
-
-                //TODO: Print?
-                children.push(menu_item(fl!("show-details"), Action::Preview).into());
+                column = column
+                    .push(menu_item(fl!("compress"), Action::Compress))
+                    .push(divider::horizontal::light())
+                    //TODO: Print?
+                    .push(menu_item(fl!("show-details"), Action::Preview));
                 if matches!(tab.mode, tab::Mode::App) {
-                    children.push(divider::horizontal::light().into());
-                    children.push(menu_item(fl!("add-to-sidebar"), Action::AddToSidebar).into());
+                    column = column
+                        .push(divider::horizontal::light())
+                        .push(menu_item(fl!("add-to-sidebar"), Action::AddToSidebar));
                 }
-                children.push(divider::horizontal::light().into());
+                column = column.push(divider::horizontal::light());
                 if matches!(tab.location, Location::Recents) {
-                    children.push(
-                        menu_item(fl!("remove-from-recents"), Action::RemoveFromRecents).into(),
-                    );
-                    children.push(divider::horizontal::light().into());
+                    column = column
+                        .push(menu_item(
+                            fl!("remove-from-recents"),
+                            Action::RemoveFromRecents,
+                        ))
+                        .push(divider::horizontal::light());
                 }
                 if selected_mount_point == 0 {
                     if modifiers.shift() && !modifiers.control() {
-                        children.push(
-                            menu_item(fl!("delete-permanently"), Action::PermanentlyDelete).into(),
-                        );
+                        column = column.push(menu_item(
+                            fl!("delete-permanently"),
+                            Action::PermanentlyDelete,
+                        ));
                     } else {
-                        children.push(menu_item(fl!("move-to-trash"), Action::Delete).into());
+                        column = column.push(menu_item(fl!("move-to-trash"), Action::Delete));
                     }
                 } else if selected == 1 {
-                    children.push(menu_item(fl!("eject"), Action::Eject).into());
+                    column = column.push(menu_item(fl!("eject"), Action::Eject));
                 }
             } else {
                 //TODO: need better designs for menu with no selection
                 //TODO: have things like properties but they apply to the folder?
                 if tab.location != Location::Recents {
-                    children.push(menu_item(fl!("new-folder"), Action::NewFolder).into());
-                    children.push(menu_item(fl!("new-file"), Action::NewFile).into());
-                    children.push(menu_item(fl!("open-in-terminal"), Action::OpenTerminal).into());
-                    children.push(divider::horizontal::light().into());
+                    column = column
+                        .push(menu_item(fl!("new-folder"), Action::NewFolder))
+                        .push(menu_item(fl!("new-file"), Action::NewFile))
+                        .push(menu_item(fl!("open-in-terminal"), Action::OpenTerminal))
+                        .push(divider::horizontal::light());
                 }
 
                 if tab.mode.multiple() {
-                    children.push(menu_item(fl!("select-all"), Action::SelectAll).into());
+                    column = column.push(menu_item(fl!("select-all"), Action::SelectAll));
                 }
                 if can_paste {
-                    children.push(menu_item(fl!("paste"), Action::Paste).into());
+                    column = column.push(menu_item(fl!("paste"), Action::Paste));
                 } else {
-                    children.push(menu_item_disabled(fl!("paste"), Action::Paste).into());
+                    column = column.push(menu_item_disabled(fl!("paste"), Action::Paste));
                 }
 
                 //TODO: only show if cosmic-settings is found?
                 if matches!(tab.mode, tab::Mode::Desktop) {
-                    children.push(divider::horizontal::light().into());
-                    children.push(
-                        menu_item(fl!("change-wallpaper"), Action::CosmicSettingsWallpaper).into(),
-                    );
-                    children.push(
-                        menu_item(fl!("desktop-appearance"), Action::CosmicSettingsDesktop).into(),
-                    );
-                    children.push(
-                        menu_item(fl!("display-settings"), Action::CosmicSettingsDisplays).into(),
-                    );
+                    column = column
+                        .push(divider::horizontal::light())
+                        .push(menu_item(
+                            fl!("change-wallpaper"),
+                            Action::CosmicSettingsWallpaper,
+                        ))
+                        .push(menu_item(
+                            fl!("desktop-appearance"),
+                            Action::CosmicSettingsDesktop,
+                        ))
+                        .push(menu_item(
+                            fl!("display-settings"),
+                            Action::CosmicSettingsDisplays,
+                        ));
                 }
 
-                children.push(divider::horizontal::light().into());
-                // TODO: Nested menu
-                children.push(sort_item(fl!("sort-by-name"), HeadingOptions::Name));
-                children.push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified));
-                children.push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
+                column = column
+                    .push(divider::horizontal::light())
+                    // TODO: Nested menu
+                    .push(sort_item(fl!("sort-by-name"), HeadingOptions::Name))
+                    .push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified))
+                    .push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
                 if matches!(tab.location, Location::Desktop(..)) {
-                    children.push(divider::horizontal::light().into());
-                    children.push(
-                        menu_item(fl!("desktop-view-options"), Action::DesktopViewOptions).into(),
-                    );
+                    column = column.push(divider::horizontal::light()).push(menu_item(
+                        fl!("desktop-view-options"),
+                        Action::DesktopViewOptions,
+                    ));
                 }
             }
         }
@@ -328,71 +334,86 @@ pub fn context_menu<'a>(
         ) => {
             if selected > 0 {
                 if selected_dir == 1 && selected == 1 || selected_dir == 0 {
-                    children.push(menu_item(fl!("open"), Action::Open).into());
+                    column = column.push(menu_item(fl!("open"), Action::Open));
                 }
                 if matches!(tab.location, Location::Search(..) | Location::Recents) {
-                    children.push(
-                        menu_item(fl!("open-item-location"), Action::OpenItemLocation).into(),
-                    );
+                    column = column.push(menu_item(
+                        fl!("open-item-location"),
+                        Action::OpenItemLocation,
+                    ));
                 }
-                children.push(divider::horizontal::light().into());
-                children.push(menu_item(fl!("show-details"), Action::Preview).into());
+                column = column
+                    .push(divider::horizontal::light())
+                    .push(menu_item(fl!("show-details"), Action::Preview));
             } else {
+                let mut column_has_children = false;
                 if dialog_kind.save() {
-                    children.push(menu_item(fl!("new-folder"), Action::NewFolder).into());
+                    column_has_children = true;
+                    column = column.push(menu_item(fl!("new-folder"), Action::NewFolder));
                 }
                 if tab.mode.multiple() {
-                    children.push(menu_item(fl!("select-all"), Action::SelectAll).into());
+                    column_has_children = true;
+                    column = column.push(menu_item(fl!("select-all"), Action::SelectAll));
                 }
-                if !children.is_empty() {
-                    children.push(divider::horizontal::light().into());
+                if column_has_children {
+                    column = column.push(divider::horizontal::light());
                 }
-                children.push(sort_item(fl!("sort-by-name"), HeadingOptions::Name));
-                children.push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified));
-                children.push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
+                column = column
+                    .push(sort_item(fl!("sort-by-name"), HeadingOptions::Name))
+                    .push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified))
+                    .push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
             }
         }
         (_, Location::Network(..)) => {
             if selected > 0 {
                 if selected_dir == 1 && selected == 1 || selected_dir == 0 {
-                    children.push(menu_item(fl!("open"), Action::Open).into());
+                    column = column.push(menu_item(fl!("open"), Action::Open));
                 }
             } else {
+                let mut column_has_children = false;
                 if tab.mode.multiple() {
-                    children.push(menu_item(fl!("select-all"), Action::SelectAll).into());
+                    column_has_children = true;
+                    column = column.push(menu_item(fl!("select-all"), Action::SelectAll));
                 }
-                if !children.is_empty() {
-                    children.push(divider::horizontal::light().into());
+                if column_has_children {
+                    column = column.push(divider::horizontal::light());
                 }
-                children.push(sort_item(fl!("sort-by-name"), HeadingOptions::Name));
-                children.push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified));
-                children.push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
+                column = column
+                    .push(sort_item(fl!("sort-by-name"), HeadingOptions::Name))
+                    .push(sort_item(fl!("sort-by-modified"), HeadingOptions::Modified))
+                    .push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
             }
         }
         (_, Location::Trash) => {
+            let mut column_has_children = false;
             if tab.mode.multiple() {
-                children.push(menu_item(fl!("select-all"), Action::SelectAll).into());
+                column_has_children = true;
+                column = column.push(menu_item(fl!("select-all"), Action::SelectAll));
             }
-            if !children.is_empty() {
-                children.push(divider::horizontal::light().into());
+            if column_has_children {
+                column = column.push(divider::horizontal::light());
             }
             if selected > 0 {
-                children.push(menu_item(fl!("show-details"), Action::Preview).into());
-                children.push(divider::horizontal::light().into());
-                children
-                    .push(menu_item(fl!("restore-from-trash"), Action::RestoreFromTrash).into());
-                children.push(divider::horizontal::light().into());
-                children.push(menu_item(fl!("delete-permanently"), Action::Delete).into());
+                column = column
+                    .push(menu_item(fl!("show-details"), Action::Preview))
+                    .push(divider::horizontal::light())
+                    .push(menu_item(
+                        fl!("restore-from-trash"),
+                        Action::RestoreFromTrash,
+                    ))
+                    .push(divider::horizontal::light())
+                    .push(menu_item(fl!("delete-permanently"), Action::Delete));
             } else {
                 // TODO: Nested menu
-                children.push(sort_item(fl!("sort-by-name"), HeadingOptions::Name));
-                children.push(sort_item(fl!("sort-by-trashed"), HeadingOptions::TrashedOn));
-                children.push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
+                column = column
+                    .push(sort_item(fl!("sort-by-name"), HeadingOptions::Name))
+                    .push(sort_item(fl!("sort-by-trashed"), HeadingOptions::TrashedOn))
+                    .push(sort_item(fl!("sort-by-size"), HeadingOptions::Size));
             }
         }
     }
 
-    container(column::with_children(children))
+    container(column)
         .padding(1)
         //TODO: move style to libcosmic
         .style(|theme| {
@@ -410,7 +431,7 @@ pub fn context_menu<'a>(
                 ..Default::default()
             }
         })
-        .width(Length::Fixed(360.0))
+        .width(360.0)
         .into()
 }
 
@@ -430,14 +451,12 @@ pub fn dialog_menu(
     };
     let in_trash = tab.location == Location::Trash;
 
-    let mut selected_gallery = 0;
-    if let Some(items) = tab.items_opt() {
-        for item in items {
-            if item.selected && item.can_gallery() {
-                selected_gallery += 1;
-            }
-        }
-    }
+    let selected_gallery = tab.items_opt().map_or(0, |items| {
+        items
+            .iter()
+            .filter(|&item| item.selected && item.can_gallery())
+            .count()
+    });
 
     MenuBar::new(vec![
         menu::Tree::with_children(
@@ -559,14 +578,14 @@ pub fn dialog_menu(
     .into()
 }
 
-pub fn menu_bar<'a>(
+pub fn menu_bar(
     core: &Core,
     tab_opt: Option<&Tab>,
     config: &Config,
-    modifiers: &Modifiers,
+    modifiers: Modifiers,
     key_binds: &HashMap<KeyBind, Action>,
     clipboard_paste_available: bool,
-) -> Element<'a, Message> {
+) -> Element<'static, Message> {
     let sort_options = tab_opt.map(Tab::sort_options);
     let sort_item = |label, sort, dir| {
         menu::Item::CheckBox(
@@ -583,16 +602,14 @@ pub fn menu_bar<'a>(
     let mut selected_dir = 0;
     let mut selected = 0;
     let mut selected_gallery = 0;
-    if let Some(items) = tab_opt.and_then(|tab| tab.items_opt()) {
-        for item in items {
-            if item.selected {
-                selected += 1;
-                if item.metadata.is_dir() {
-                    selected_dir += 1;
-                }
-                if item.can_gallery() {
-                    selected_gallery += 1;
-                }
+    if let Some(items) = tab_opt.and_then(Tab::items_opt) {
+        for item in items.iter().filter(|&item| item.selected) {
+            selected += 1;
+            if item.metadata.is_dir() {
+                selected_dir += 1;
+            }
+            if item.can_gallery() {
+                selected_gallery += 1;
             }
         }
     }
@@ -760,7 +777,7 @@ pub fn menu_bar<'a>(
         )
 }
 
-pub fn location_context_menu<'a>(ancestor_index: usize) -> Element<'a, tab::Message> {
+pub fn location_context_menu(ancestor_index: usize) -> Element<'static, tab::Message> {
     //TODO: only add some of these when in App mode
     let children = [
         menu_button!(text::body(fl!("open-in-new-tab")))
@@ -804,6 +821,6 @@ pub fn location_context_menu<'a>(ancestor_index: usize) -> Element<'a, tab::Mess
                 ..Default::default()
             }
         })
-        .width(Length::Fixed(360.0))
+        .width(360.0)
         .into()
 }

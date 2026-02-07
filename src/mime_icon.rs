@@ -17,6 +17,7 @@ struct MimeIconKey {
     size: u16,
 }
 
+#[derive(Default)]
 struct MimeIconCache {
     cache: FxHashMap<MimeIconKey, Option<icon::Handle>>,
     shared_mime_info: xdg_mime::SharedMimeInfo,
@@ -24,10 +25,7 @@ struct MimeIconCache {
 
 impl MimeIconCache {
     pub fn new() -> Self {
-        Self {
-            cache: FxHashMap::default(),
-            shared_mime_info: xdg_mime::SharedMimeInfo::new(),
-        }
+        Self::default()
     }
 
     pub fn get(&mut self, key: MimeIconKey) -> Option<icon::Handle> {
@@ -94,10 +92,9 @@ pub fn mime_for_path(
 
 pub fn mime_icon(mime: Mime, size: u16) -> icon::Handle {
     let mut mime_icon_cache = MIME_ICON_CACHE.lock().unwrap();
-    match mime_icon_cache.get(MimeIconKey { mime, size }) {
-        Some(handle) => handle,
-        None => icon::from_name(FALLBACK_MIME_ICON).size(size).handle(),
-    }
+    mime_icon_cache
+        .get(MimeIconKey { mime, size })
+        .unwrap_or_else(|| icon::from_name(FALLBACK_MIME_ICON).size(size).handle())
 }
 
 pub fn parent_mime_types(mime: &Mime) -> Option<Vec<Mime>> {

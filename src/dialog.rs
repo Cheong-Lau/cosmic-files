@@ -25,8 +25,8 @@ use cosmic::{
     },
 };
 use notify_debouncer_full::{
-    DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
-    notify::{self, RecommendedWatcher},
+    DebouncedEvent, new_debouncer,
+    notify::{self, EventKind, event::ModifyKind},
 };
 use recently_used_xbel::update_recently_used;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -39,6 +39,7 @@ use std::{
 };
 
 use crate::{
+    Debouncer,
     app::{
         Action, ContextPage, Message as AppMessage, PreviewItem, PreviewKind, REPLACE_BUTTON_ID,
     },
@@ -48,7 +49,7 @@ use crate::{
     localize::LANGUAGE_SORTER,
     menu,
     mounter::{MOUNTERS, MounterItem, MounterItems, MounterKey, MounterMessage},
-    tab::{self, ItemMetadata, Location, Tab},
+    tab::{self, Item, ItemMetadata, Location, Tab},
     zoom::{zoom_in_view, zoom_out_view, zoom_to_default},
 };
 
@@ -375,8 +376,8 @@ impl<M: Send + 'static> Dialog<M> {
             if !self.cosmic.surface_views.is_empty() {
                 log::debug!("waiting for surfaces to close...");
                 let mut tasks = Vec::new();
-                for id in self.cosmic.surface_views.iter() {
-                    match id.1.1 {
+                for views in self.cosmic.surface_views.values() {
+                    match views.1 {
                         SurfaceIdWrapper::Window(id) => {
                             tasks.push(window::close::<M>(id).discard());
                         }
@@ -524,7 +525,7 @@ impl From<AppMessage> for Message {
 pub struct MounterData(MounterKey, MounterItem);
 
 struct WatcherWrapper {
-    watcher_opt: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    watcher_opt: Option<Debouncer>,
 }
 
 impl Clone for WatcherWrapper {
@@ -566,10 +567,7 @@ struct App {
     search_id: widget::Id,
     tab: Tab,
     key_binds: HashMap<KeyBind, Action>,
-    watcher_opt: Option<(
-        Debouncer<RecommendedWatcher, RecommendedCache>,
-        FxHashSet<PathBuf>,
-    )>,
+    watcher_opt: Option<(Debouncer, FxHashSet<PathBuf>)>,
     auto_scroll_speed: Option<i16>,
     type_select_prefix: String,
     type_select_last_key: Option<Instant>,
@@ -625,10 +623,11 @@ impl App {
                     selected,
                     ..
                 } => {
-                    row = row.push(widget::text::heading(label));
-                    row = row.push(widget::dropdown(options, *selected, move |option_i| {
-                        Message::Choice(choice_i, option_i)
-                    }));
+                    row = row
+                        .push(widget::text::heading(label))
+                        .push(widget::dropdown(options, *selected, move |option_i| {
+                            Message::Choice(choice_i, option_i)
+                        }));
                 }
             }
         }
@@ -639,18 +638,14 @@ impl App {
                 .align_y(Alignment::Center)
                 .spacing(space_xxs);
         }
-        row = row.push(widget::horizontal_space());
-        row = row.push(widget::button::standard(fl!("cancel")).on_press(Message::Cancel));
+        row = row
+            .push(widget::horizontal_space())
+            .push(widget::button::standard(fl!("cancel")).on_press(Message::Cancel));
 
-        let mut has_selected = false;
-        if let Some(items) = self.tab.items_opt() {
-            for item in items {
-                if item.selected {
-                    has_selected = true;
-                    break;
-                }
-            }
-        }
+        let has_selected = self
+            .tab
+            .items_opt()
+            .is_some_and(|items| items.iter().any(|item| item.selected));
         row = row.push(
             //TODO: easier way to create buttons with rich text
             widget::button::custom(
@@ -819,7 +814,7 @@ impl App {
         self.update(Message::TabMessage(tab::Message::Config(self.tab.config)))
     }
 
-    fn with_dialog_config<F: Fn(&mut DialogConfig)>(&mut self, f: F) -> Task<Message> {
+    fn with_dialog_config<F: FnOnce(&mut DialogConfig)>(&mut self, f: F) -> Task<Message> {
         let mut dialog = self.flags.config.dialog;
         f(&mut dialog);
         if dialog == self.flags.config.dialog {
@@ -894,18 +889,20 @@ impl App {
                             })
                             .size(16),
                         )
-                        .data(Location::Path(path.clone()))
+                        .data(Location::Path(path))
                 });
             }
         }
 
         // Collect all mounter items
         let mut nav_items = Vec::new();
-        for (key, items) in &self.mounter_items {
-            nav_items.extend(items.iter().map(|item| (*key, item)));
+        for (&key, items) in &self.mounter_items {
+            nav_items.extend(items.iter().map(|item| (key, item)));
         }
         // Sort by name lexically
-        nav_items.sort_unstable_by(|a, b| LANGUAGE_SORTER.compare(&a.1.name(), &b.1.name()));
+        nav_items.sort_unstable_by(|&(_, item_a), &(_, item_b)| {
+            LANGUAGE_SORTER.compare(&item_a.name(), &item_b.name())
+        });
         // Add items to nav model
         for (i, (key, item)) in nav_items.into_iter().enumerate() {
             nav_model = nav_model.insert(|mut b| {
@@ -939,35 +936,31 @@ impl App {
     fn update_watcher(&mut self) -> Task<Message> {
         if let Some((mut watcher, old_paths)) = self.watcher_opt.take() {
             let mut new_paths = FxHashSet::default();
-            if let Some(path) = &self.tab.location.path_opt() {
-                new_paths.insert((*path).clone());
+            if let Some(path) = self.tab.location.path_opt() {
+                new_paths.insert(path.clone());
             }
 
             // Unwatch paths no longer used
-            for path in &old_paths {
-                if !new_paths.contains(path) {
-                    match watcher.unwatch(path) {
-                        Ok(()) => {
-                            log::debug!("unwatching {}", path.display());
-                        }
-                        Err(err) => {
-                            log::debug!("failed to unwatch {}: {}", path.display(), err);
-                        }
+            for path in old_paths.difference(&new_paths) {
+                match watcher.unwatch(path) {
+                    Ok(()) => {
+                        log::debug!("unwatching {}", path.display());
+                    }
+                    Err(err) => {
+                        log::debug!("failed to unwatch {}: {}", path.display(), err);
                     }
                 }
             }
 
             // Watch new paths
-            for path in &new_paths {
-                if !old_paths.contains(path) {
-                    //TODO: should this be recursive?
-                    match watcher.watch(path, notify::RecursiveMode::NonRecursive) {
-                        Ok(()) => {
-                            log::debug!("watching {}", path.display());
-                        }
-                        Err(err) => {
-                            log::debug!("failed to watch {}: {}", path.display(), err);
-                        }
+            for path in new_paths.difference(&old_paths) {
+                //TODO: should this be recursive?
+                match watcher.watch(path, notify::RecursiveMode::NonRecursive) {
+                    Ok(()) => {
+                        log::debug!("watching {}", path.display());
+                    }
+                    Err(err) => {
+                        log::debug!("failed to watch {}: {}", path.display(), err);
                     }
                 }
             }
@@ -1012,13 +1005,12 @@ impl Application for App {
         let title = flags.kind.title();
         let accept_label = flags.kind.accept_label();
 
-        let location = Location::Path(match &flags.path_opt {
-            Some(path) => path.clone(),
-            None => match env::current_dir() {
-                Ok(path) => path,
-                Err(_) => home_dir(),
-            },
-        });
+        let location = Location::Path(
+            flags
+                .path_opt
+                .clone()
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| home_dir())),
+        );
 
         let mut tab = Tab::new(
             location,
@@ -1214,7 +1206,7 @@ impl Application for App {
             } else {
                 elements.push(
                     widget::text_input::search_input("", term)
-                        .width(Length::Fixed(240.0))
+                        .width(240.0)
                         .id(self.search_id.clone())
                         .on_clear(Message::SearchClear)
                         .on_input(Message::SearchInput)
@@ -1387,8 +1379,9 @@ impl Application for App {
             Message::DialogComplete => {
                 if let Some(dialog_page) = self.dialog_pages.pop_front() {
                     match dialog_page {
-                        DialogPage::NewFolder { parent, name } => {
-                            let path = parent.join(name);
+                        DialogPage::NewFolder { mut parent, name } => {
+                            parent.push(name);
+                            let path = parent;
                             match fs::create_dir(&path) {
                                 Ok(()) => {
                                     // cd to directory
@@ -1409,8 +1402,8 @@ impl Application for App {
                 }
             }
             Message::DialogUpdate(dialog_page) => {
-                if !self.dialog_pages.is_empty() {
-                    self.dialog_pages[0] = dialog_page;
+                if let Some(front) = self.dialog_pages.front_mut() {
+                    *front = dialog_page;
                 }
             }
             Message::Escape => return self.on_escape(),
@@ -1464,7 +1457,7 @@ impl Application for App {
                         TypeToSearch::EnterPath => {
                             let location = (self.tab.edit_location)
                                 .as_ref()
-                                .map_or_else(|| &self.tab.location, |x| &x.location);
+                                .map_or(&self.tab.location, |x| &x.location);
                             // Try to add text to end of location
                             if let Some(path) = location.path_opt() {
                                 let mut path_string = path.to_string_lossy().to_string();
@@ -1507,16 +1500,10 @@ impl Application for App {
                         if let Some(old_path) = old_item.path()
                             && old_item.is_mounted()
                         {
-                            let mut still_mounted = false;
-                            for item in &mounter_items {
-                                if let Some(path) = item.path()
-                                    && path == old_path
-                                    && item.is_mounted()
-                                {
-                                    still_mounted = true;
-                                    break;
-                                }
-                            }
+                            let still_mounted = mounter_items.iter().any(|item| {
+                                item.is_mounted()
+                                    && item.path().is_some_and(|path| path == old_path)
+                            });
                             if !still_mounted {
                                 unmounted.push(Location::Path(old_path));
                             }
@@ -1565,45 +1552,46 @@ impl Application for App {
                 if let Some(path) = self.tab.location.path_opt() {
                     let mut contains_change = false;
                     for event in &events {
-                        for event_path in &event.paths {
-                            if event_path.starts_with(path) {
-                                if let notify::EventKind::Modify(
-                                    notify::event::ModifyKind::Metadata(_)
-                                    | notify::event::ModifyKind::Data(_),
-                                ) = event.kind
-                                {
-                                    // If metadata or data changed, find the matching item and reload it
-                                    //TODO: this could be further optimized by looking at what exactly changed
-                                    if let Some(items) = &mut self.tab.items_opt {
-                                        for item in items.iter_mut() {
-                                            if item.path_opt() == Some(event_path) {
-                                                //TODO: reload more, like mime types?
-                                                match fs::metadata(event_path) {
-                                                    Ok(new_metadata) => {
-                                                        if let ItemMetadata::Path {
-                                                            metadata, ..
-                                                        } = &mut item.metadata
-                                                        {
-                                                            *metadata = new_metadata;
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        log::warn!(
-                                                            "failed to reload metadata for {}: {}",
-                                                            path.display(),
-                                                            err
-                                                        );
-                                                    }
+                        for event_path in event
+                            .paths
+                            .iter()
+                            .filter(|&event_path| event_path.starts_with(path))
+                        {
+                            if matches!(
+                                event.kind,
+                                EventKind::Modify(ModifyKind::Metadata(_) | ModifyKind::Data(_),)
+                            ) {
+                                // If metadata or data changed, find the matching item and reload it
+                                //TODO: this could be further optimized by looking at what exactly changed
+                                if let Some(items) = &mut self.tab.items_opt {
+                                    for item in items
+                                        .iter_mut()
+                                        .filter(|item| item.path_opt() == Some(event_path))
+                                    {
+                                        //TODO: reload more, like mime types?
+                                        if let ItemMetadata::Path { metadata, .. } =
+                                            &mut item.metadata
+                                        {
+                                            match fs::metadata(event_path) {
+                                                Ok(new_metadata) => {
+                                                    *metadata = new_metadata;
                                                 }
-                                                //TODO item.thumbnail_opt =
+                                                Err(err) => {
+                                                    log::warn!(
+                                                        "failed to reload metadata for {}: {}",
+                                                        path.display(),
+                                                        err
+                                                    );
+                                                }
                                             }
                                         }
+                                        //TODO item.thumbnail_opt =
                                     }
-                                } else {
-                                    // Any other events reload the whole tab
-                                    contains_change = true;
-                                    break;
                                 }
+                            } else {
+                                // Any other events reload the whole tab
+                                contains_change = true;
+                                break;
                             }
                         }
                     }
@@ -1623,24 +1611,24 @@ impl Application for App {
                 }
             },
             Message::Open => {
-                let mut paths = Vec::new();
-                if let Some(items) = self.tab.items_opt() {
-                    for item in items {
-                        if item.selected
-                            && let Some(path) = item.path_opt()
-                        {
-                            paths.push(path.clone());
+                let paths: Vec<PathBuf> = self.tab.items_opt().map_or_else(Vec::new, |items| {
+                    items
+                        .iter()
+                        .filter(|&item| item.selected)
+                        .filter_map(Item::path_opt)
+                        .map(|path| {
                             if self.flags.config.show_recents {
-                                let _ = update_recently_used(
+                                _ = update_recently_used(
                                     path,
                                     Self::APP_ID.to_string(),
                                     "cosmic-files".to_string(),
                                     None,
                                 );
                             }
-                        }
-                    }
-                }
+                            path.clone()
+                        })
+                        .collect()
+                });
 
                 // Ensure selection is allowed
                 //TODO: improve tab logic so this doesn't block the open button so often
@@ -1756,73 +1744,68 @@ impl Application for App {
                         }
                         tab::Command::ContextMenu(point_opt, parent_id) => {
                             #[cfg(feature = "wayland")]
-                            match point_opt {
-                                Some(point) => {
-                                    if crate::is_wayland() {
-                                        // Open context menu
-                                        use cctk::wayland_protocols::xdg::shell::client::xdg_positioner::{
-                                            Anchor, Gravity,
-                                        };
-                                        use cosmic::iced_runtime::platform_specific::wayland::popup::{
-                                            SctkPopupSettings, SctkPositioner,
-                                        };
-                                        use cosmic::iced::Rectangle;
-                                        let window_id = window::Id::unique();
-                                        self.context_menu_window = Some(window_id);
-                                        let autosize_id = widget::Id::unique();
-                                        commands.push(self.update(Message::Surface(
-                                            cosmic::surface::action::app_popup(
-                                                move |app: &mut Self| -> SctkPopupSettings {
-                                                    let anchor_rect = Rectangle {
-                                                        x: point.x as i32,
-                                                        y: point.y as i32,
-                                                        width: 1,
-                                                        height: 1,
-                                                    };
-                                                    let positioner = SctkPositioner {
-                                                        size: None,
-                                                        anchor_rect,
-                                                        anchor: Anchor::None,
-                                                        gravity: Gravity::BottomRight,
-                                                        reactive: true,
-                                                        ..Default::default()
-                                                    };
-                                                    SctkPopupSettings {
-                                                        parent: parent_id
-                                                            .unwrap_or(app.flags.window_id),
-                                                        id: window_id,
-                                                        positioner,
-                                                        parent_size: None,
-                                                        grab: true,
-                                                        close_with_children: false,
-                                                        input_zone: None,
-                                                    }
-                                                },
-                                                Some(Box::new(move |app: &Self| {
-                                                    widget::autosize::autosize(
-                                                        menu::context_menu(
-                                                            &app.tab,
-                                                            &app.key_binds,
-                                                            &app.modifiers,
-                                                            false, // Paste not used in dialogs
-                                                        )
-                                                        .map(Message::TabMessage)
-                                                        .map(cosmic::Action::App),
-                                                        autosize_id.clone(),
+                            if let Some(point) = point_opt {
+                                if crate::is_wayland() {
+                                    // Open context menu
+                                    use cctk::wayland_protocols::xdg::shell::client::xdg_positioner::{
+                                        Anchor, Gravity,
+                                    };
+                                    use cosmic::iced_runtime::platform_specific::wayland::popup::{
+                                        SctkPopupSettings, SctkPositioner,
+                                    };
+                                    use cosmic::iced::Rectangle;
+                                    let window_id = window::Id::unique();
+                                    self.context_menu_window = Some(window_id);
+                                    let autosize_id = widget::Id::unique();
+                                    commands.push(self.update(Message::Surface(
+                                        cosmic::surface::action::app_popup(
+                                            move |app: &mut Self| {
+                                                let anchor_rect = Rectangle {
+                                                    x: point.x as i32,
+                                                    y: point.y as i32,
+                                                    width: 1,
+                                                    height: 1,
+                                                };
+                                                let positioner = SctkPositioner {
+                                                    size: None,
+                                                    anchor_rect,
+                                                    anchor: Anchor::None,
+                                                    gravity: Gravity::BottomRight,
+                                                    reactive: true,
+                                                    ..Default::default()
+                                                };
+                                                SctkPopupSettings {
+                                                    parent: parent_id
+                                                        .unwrap_or(app.flags.window_id),
+                                                    id: window_id,
+                                                    positioner,
+                                                    parent_size: None,
+                                                    grab: true,
+                                                    close_with_children: false,
+                                                    input_zone: None,
+                                                }
+                                            },
+                                            Some(Box::new(move |app: &Self| {
+                                                widget::autosize::autosize(
+                                                    menu::context_menu(
+                                                        &app.tab,
+                                                        &app.key_binds,
+                                                        app.modifiers,
+                                                        false, // Paste not used in dialogs
                                                     )
-                                                    .into()
-                                                })),
-                                            ),
-                                        )));
-                                    }
+                                                    .map(Message::TabMessage)
+                                                    .map(cosmic::Action::App),
+                                                    autosize_id.clone(),
+                                                )
+                                                .into()
+                                            })),
+                                        ),
+                                    )));
                                 }
-                                None => {
-                                    if let Some(window_id) = self.context_menu_window.take() {
-                                        commands.push(self.update(Message::Surface(
-                                            cosmic::surface::action::destroy_popup(window_id),
-                                        )));
-                                    }
-                                }
+                            } else if let Some(window_id) = self.context_menu_window.take() {
+                                commands.push(self.update(Message::Surface(
+                                    cosmic::surface::action::destroy_popup(window_id),
+                                )));
                             }
                         }
                         tab::Command::Iced(iced_command) => {
@@ -1892,7 +1875,7 @@ impl Application for App {
                             // Directories are always shown
                             item.metadata.is_dir()
                                 // Check for mime type match (first because it is faster)
-                                    || mimes.iter().copied().any(|mime| mime == item.mime)
+                                    || mimes.iter().any(|&mime| mime == item.mime)
                                 // Check for glob match (last because it is slower)
                                     || parsed_globs.iter().any(|glob| glob.matches(&item.name))
                         });
@@ -1908,11 +1891,14 @@ impl Application for App {
                     self.tab.parent_item_opt = parent_item_opt;
                     self.tab.set_items(items);
 
-                    if let Some(mut selection_paths) = selection_paths {
-                        if !self.flags.kind.multiple() {
-                            selection_paths.truncate(1);
+                    if let Some(selection_paths) = selection_paths
+                        && !selection_paths.is_empty()
+                    {
+                        if self.flags.kind.multiple() {
+                            self.tab.select_paths(&selection_paths);
+                        } else {
+                            self.tab.select_paths(&selection_paths[..1]);
                         }
-                        self.tab.select_paths(selection_paths);
                     }
 
                     // Reset focus on location change
@@ -1989,7 +1975,7 @@ impl Application for App {
 
         col = col.push(
             self.tab
-                .view(&self.key_binds, &self.modifiers, false)
+                .view(&self.key_binds, self.modifiers, false)
                 .map(Message::TabMessage),
         );
 
@@ -2063,12 +2049,12 @@ impl Application for App {
                                     Ok(mut events) => {
                                         events.retain(|event| {
                                             match &event.kind {
-                                                notify::EventKind::Access(_) => {
+                                                EventKind::Access(_) => {
                                                     // Data not mutated
                                                     false
                                                 }
-                                                notify::EventKind::Modify(
-                                                    notify::event::ModifyKind::Metadata(e),
+                                                EventKind::Modify(
+                                                    ModifyKind::Metadata(e),
                                                 ) if (*e != notify::event::MetadataKind::Any
                                                     && *e
                                                         != notify::event::MetadataKind::WriteTime) =>
@@ -2081,9 +2067,9 @@ impl Application for App {
                                         });
 
                                         if !events.is_empty() {
-                                            match futures::executor::block_on(async {
-                                                output.send(Message::NotifyEvents(events)).await
-                                            }) {
+                                            match futures::executor::block_on(
+                                                output.send(Message::NotifyEvents(events)),
+                                            ) {
                                                 Ok(()) => {}
                                                 Err(err) => {
                                                     log::warn!(
@@ -2142,10 +2128,10 @@ impl Application for App {
             );
         }
 
-        subscriptions.extend(MOUNTERS.iter().map(|(key, mounter)| {
+        subscriptions.extend(MOUNTERS.iter().map(|(&key, mounter)| {
             mounter
                 .subscription()
-                .with(*key)
+                .with(key)
                 .map(|(key, mounter_message)| {
                     if let MounterMessage::Items(items) = mounter_message {
                         Message::MounterItems(key, items)
