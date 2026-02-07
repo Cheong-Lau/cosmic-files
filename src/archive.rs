@@ -3,8 +3,8 @@ use crate::{
     operation::{Controller, OpReader, OperationError, OperationErrorType, sync_to_disk},
 };
 use cosmic::iced::futures;
+use rustc_hash::FxHashSet;
 use std::{
-    collections::HashSet,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -43,11 +43,10 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
 pub fn extract(
     path: &Path,
     new_dir: &Path,
-    password: &Option<String>,
+    password: Option<&str>,
     controller: &Controller,
 ) -> Result<(), OperationError> {
     let mime = mime_for_path(path, None, false);
-    let password = password.as_deref();
     match mime.essence_str() {
         "application/gzip" | "application/x-compressed-tar" => {
             OpReader::new(path, controller.clone())
@@ -55,27 +54,25 @@ pub fn extract(
                 .map(flate2::read::GzDecoder::new)
                 .map(tar::Archive::new)
                 .and_then(|mut archive| archive.unpack(new_dir))
-                .map_err(|e| OperationError::from_err(e, controller))?;
+                .map_err(|e| OperationError::from_err(e, controller))
         }
         "application/x-tar" => OpReader::new(path, controller.clone())
             .map(io::BufReader::new)
             .map(tar::Archive::new)
             .and_then(|mut archive| archive.unpack(new_dir))
-            .map_err(|e| OperationError::from_err(e, controller))?,
+            .map_err(|e| OperationError::from_err(e, controller)),
         "application/zip" => fs::File::open(path)
             .map(io::BufReader::new)
             .map(zip::ZipArchive::new)
             .map_err(|e| OperationError::from_err(e, controller))?
-            .and_then(move |mut archive| {
-                zip_extract(&mut archive, new_dir, password, controller.clone())
-            })
+            .and_then(move |mut archive| zip_extract(&mut archive, new_dir, password, controller))
             .map_err(|e| match e {
                 ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED)
                 | ZipError::InvalidPassword => {
                     OperationError::from_kind(OperationErrorType::PasswordRequired, controller)
                 }
                 _ => OperationError::from_err(e, controller),
-            })?,
+            }),
         #[cfg(feature = "bzip2")]
         "application/x-bzip"
         | "application/x-bzip-compressed-tar"
@@ -85,7 +82,7 @@ pub fn extract(
             .map(bzip2::read::BzDecoder::new)
             .map(tar::Archive::new)
             .and_then(|mut archive| archive.unpack(new_dir))
-            .map_err(|e| OperationError::from_err(e, controller))?,
+            .map_err(|e| OperationError::from_err(e, controller)),
         #[cfg(feature = "lzma-rust2")]
         "application/x-xz" | "application/x-xz-compressed-tar" => {
             OpReader::new(path, controller.clone())
@@ -93,14 +90,13 @@ pub fn extract(
                 .map(|reader| lzma_rust2::XzReader::new(reader, true))
                 .map(tar::Archive::new)
                 .and_then(|mut archive| archive.unpack(new_dir))
-                .map_err(|e| OperationError::from_err(e, controller))?;
+                .map_err(|e| OperationError::from_err(e, controller))
         }
         _ => Err(OperationError::from_err(
             format!("unsupported mime type {mime:?}"),
             controller,
-        ))?,
+        )),
     }
-    Ok(())
 }
 
 // From https://docs.rs/zip/latest/zip/read/struct.ZipArchive.html#method.extract, with cancellation and progress added
@@ -108,22 +104,20 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
     archive: &mut zip::ZipArchive<R>,
     directory: P,
     password: Option<&str>,
-    controller: Controller,
+    controller: &Controller,
 ) -> zip::result::ZipResult<()> {
     use std::{ffi::OsString, fs};
     use zip::result::ZipError;
 
     fn make_writable_dir_all<T: AsRef<Path>>(
         outpath: T,
-        target_dirs: &mut HashSet<PathBuf>,
+        target_dirs: &mut FxHashSet<PathBuf>,
     ) -> Result<(), ZipError> {
         let path = outpath.as_ref();
         if !path.exists() {
             fs::create_dir_all(path)?;
         }
-        if !target_dirs.contains(path) {
-            target_dirs.insert(path.to_path_buf());
-        }
+        target_dirs.insert(path.to_path_buf());
 
         #[cfg(unix)]
         {
@@ -140,17 +134,13 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
     let mut buffer = vec![0; 4 * 1024 * 1024];
     let total_files = archive.len();
     let mut written_files = Vec::with_capacity(total_files);
-    let mut target_dirs = HashSet::new();
+    let mut target_dirs = FxHashSet::default();
     #[cfg(unix)]
     let mut files_by_unix_mode = Vec::with_capacity(total_files);
 
     for i in 0..total_files {
-        futures::executor::block_on(async {
-            controller
-                .check()
-                .await
-                .map_err(|s| io::Error::other(OperationError::from_state(s, &controller)))
-        })?;
+        futures::executor::block_on(controller.check())
+            .map_err(|s| io::Error::other(OperationError::from_state(s, controller)))?;
 
         controller.set_progress(i as f32 / total_files as f32);
 
@@ -219,12 +209,8 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
         let mut outfile = fs::File::create(&outpath)?;
         let mut current = 0;
         loop {
-            futures::executor::block_on(async {
-                controller
-                    .check()
-                    .await
-                    .map_err(|s| io::Error::other(OperationError::from_state(s, &controller)))
-            })?;
+            futures::executor::block_on(controller.check())
+                .map_err(|s| io::Error::other(OperationError::from_state(s, controller)))?;
 
             let count = file.read(&mut buffer)?;
             if count == 0 {
@@ -263,7 +249,7 @@ fn zip_extract<R: io::Read + io::Seek, P: AsRef<Path>>(
     }
 
     // Flush files to disk
-    futures::executor::block_on(async { sync_to_disk(written_files, target_dirs).await });
+    futures::executor::block_on(sync_to_disk(written_files, target_dirs));
 
     Ok(())
 }
