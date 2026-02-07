@@ -45,10 +45,10 @@ impl ThumbnailCacher {
             fs::create_dir_all(&thumbnail_dir).unwrap_or(());
         }
         let thumbnail_path = thumbnail_dir.join(&thumbnail_filename);
-        let thumbnail_fail_marker_path = cache_base_dir
-            .join("fail")
-            .join(format!("cosmic-files-{}", env!("CARGO_PKG_VERSION")))
-            .join(&thumbnail_filename);
+
+        let mut thumbnail_fail_marker_path = cache_base_dir.join("fail");
+        thumbnail_fail_marker_path.push(format!("cosmic-files-{}", env!("CARGO_PKG_VERSION")));
+        thumbnail_fail_marker_path.push(&thumbnail_filename);
 
         Ok(Self {
             file_path: file_path.to_path_buf(),
@@ -92,7 +92,10 @@ impl ThumbnailCacher {
         &self.thumbnail_dir
     }
 
-    pub fn update_with_temp_file(&self, temp_file: NamedTempFile) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_temp_file(
+        &self,
+        temp_file: &NamedTempFile,
+    ) -> Result<&Path, Box<dyn Error>> {
         fs::set_permissions(temp_file.path(), fs::Permissions::from_mode(0o600))?;
         self.update_thumbnail_text_metadata(temp_file.path())?;
         fs::rename(temp_file.path(), &self.thumbnail_path)?;
@@ -100,7 +103,7 @@ impl ThumbnailCacher {
         Ok(&self.thumbnail_path)
     }
 
-    pub fn update_with_image(&self, image: DynamicImage) -> Result<&Path, Box<dyn Error>> {
+    pub fn update_with_image(&self, image: &DynamicImage) -> Result<&Path, Box<dyn Error>> {
         let temp_file = tempfile::Builder::new()
             .prefix("cosmic-files-")
             .tempfile_in(&self.thumbnail_dir)?;
@@ -121,7 +124,7 @@ impl ThumbnailCacher {
                 .write_image_data(&image.into_raw())?;
         }
 
-        self.update_with_temp_file(temp_file)
+        self.update_with_temp_file(&temp_file)
     }
 
     pub fn create_fail_marker(&self) -> Result<(), Box<dyn Error>> {
@@ -199,9 +202,8 @@ impl ThumbnailCacher {
     }
 
     fn is_thumbnail_valid(&self, thumbnail_path: &Path) -> bool {
-        let thumbnail_file = match File::open(thumbnail_path) {
-            Ok(file) => file,
-            Err(_) => return false,
+        let Ok(thumbnail_file) = File::open(thumbnail_path) else {
+            return false;
         };
         let decoder = png::Decoder::new(BufReader::new(thumbnail_file));
         let reader = match decoder.read_info() {
@@ -223,11 +225,8 @@ impl ThumbnailCacher {
             .iter()
             .find(|&text| text.keyword == "Thumb::URI")
             .map(|t| &t.text);
-        if let Some(thumb_uri) = thumb_uri {
-            if *thumb_uri != self.file_uri {
-                return false;
-            }
-        } else {
+
+        if thumb_uri.is_none_or(|thumb_uri| *thumb_uri != self.file_uri) {
             return false;
         }
 
@@ -263,9 +262,8 @@ impl ThumbnailCacher {
             let mtime = modified
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs()
-                .to_string();
-            if *thumb_mtime != mtime {
+                .as_secs();
+            if thumb_mtime.parse() != Ok(mtime) {
                 return false;
             }
         } else {
@@ -277,11 +275,9 @@ impl ThumbnailCacher {
             .iter()
             .find(|&text| text.keyword == "Thumb::Size")
             .map(|t| &t.text);
-        if let Some(thumb_size) = thumb_size {
-            let size = metadata.len();
-            if *thumb_size != size.to_string() {
-                return false;
-            }
+
+        if thumb_size.is_some_and(|thumb_size| thumb_size.parse() == Ok(metadata.len())) {
+            return false;
         }
 
         true
@@ -319,18 +315,6 @@ pub enum ThumbnailSize {
 }
 
 impl ThumbnailSize {
-    pub fn from_pixel_size(pixel_size: u32) -> Self {
-        if pixel_size <= Self::Normal.pixel_size() {
-            Self::Normal
-        } else if pixel_size <= Self::Large.pixel_size() {
-            Self::Large
-        } else if pixel_size <= Self::XLarge.pixel_size() {
-            Self::XLarge
-        } else {
-            Self::XXLarge
-        }
-    }
-
     pub const fn pixel_size(self) -> u32 {
         self as u32
     }
@@ -341,6 +325,20 @@ impl ThumbnailSize {
             Self::Large => "large",
             Self::XLarge => "x-large",
             Self::XXLarge => "xx-large",
+        }
+    }
+}
+
+impl From<u32> for ThumbnailSize {
+    fn from(value: u32) -> Self {
+        if value <= Self::Normal.pixel_size() {
+            Self::Normal
+        } else if value <= Self::Large.pixel_size() {
+            Self::Large
+        } else if value <= Self::XLarge.pixel_size() {
+            Self::XLarge
+        } else {
+            Self::XXLarge
         }
     }
 }
@@ -358,8 +356,9 @@ pub enum CachedThumbnail {
 }
 
 static THUMBNAIL_CACHE_BASE_DIR: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    if let Some(cache_dir) = dirs::cache_dir() {
-        return Some(cache_dir.join("thumbnails"));
+    if let Some(mut cache_dir) = dirs::cache_dir() {
+        cache_dir.push("thumbnails");
+        return Some(cache_dir);
     }
 
     log::warn!("failed to get thumbnail cache directory, thumbnails will not be cached");

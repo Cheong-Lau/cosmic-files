@@ -156,3 +156,6 @@ tokio = { version = "1", features = ["rt", "macros"] }
 
 [workspace]
 members = ["cosmic-files-applet"]
+
+[lints.clippy]
+inefficient_to_string = "warn"
