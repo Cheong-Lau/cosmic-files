@@ -8,6 +8,7 @@ use crate::{
 use cosmic::iced::futures::{self, SinkExt, StreamExt, channel::mpsc::Sender, stream};
 use std::{
     borrow::Cow,
+    ffi::OsStr,
     fmt::Formatter,
     fs,
     io::{self, Read, Write},
@@ -50,7 +51,7 @@ async fn handle_replace(
     };
 
     let (tx, mut rx) = mpsc::channel(1);
-    let _ = msg_tx
+    _ = msg_tx
         .lock()
         .await
         .send(Message::DialogPush(
@@ -69,7 +70,7 @@ async fn handle_replace(
 
 fn get_directory_name(file_name: &str) -> &str {
     // TODO: Chain with COMPOUND_EXTENSIONS once more formats are supported
-    for ext in crate::archive::SUPPORTED_EXTENSIONS {
+    for &ext in crate::archive::SUPPORTED_EXTENSIONS {
         if let Some(stripped) = file_name.strip_suffix(ext) {
             return stripped;
         }
@@ -93,10 +94,7 @@ async fn copy_or_move(
     controller: Controller,
 ) -> Result<OperationSelection, OperationError> {
     let msg_tx = msg_tx.clone();
-    let controller_c = controller.clone();
-
     compio::runtime::spawn(async move {
-        let controller = controller_c;
         log::info!(
             "{} {:?} to {}",
             match method {
@@ -162,16 +160,13 @@ async fn copy_or_move(
         {
             let controller = controller.clone();
             context = context.on_progress(move |_op, progress| {
-                let item_progress = match progress.total_bytes {
-                    Some(total_bytes) => {
-                        if total_bytes == 0 {
-                            1.0
-                        } else {
-                            progress.current_bytes as f32 / total_bytes as f32
-                        }
+                let item_progress = progress.total_bytes.map_or(0.0, |total_bytes| {
+                    if total_bytes == 0 {
+                        1.0
+                    } else {
+                        progress.current_bytes as f32 / total_bytes as f32
                     }
-                    None => 0.0,
-                };
+                });
                 let total_progress =
                     (item_progress + progress.current_ops as f32) / progress.total_ops as f32;
                 controller.set_progress(total_progress);
@@ -196,14 +191,14 @@ async fn copy_or_move(
     .map_err(wrap_compio_spawn_error)?
 }
 
-pub async fn sync_to_disk(
+pub async fn sync_to_disk<S: std::hash::BuildHasher + Send + Sync>(
     written_files: Vec<PathBuf>,
-    target_dirs: std::collections::HashSet<PathBuf>,
+    target_dirs: std::collections::HashSet<PathBuf, S>,
 ) {
     // Sync files to disk
     stream::iter(written_files.into_iter().map(|path| async move {
         if let Ok(file) = compio::fs::OpenOptions::new().write(true).open(&path).await {
-            let _ = file.sync_all().await;
+            _ = file.sync_all().await;
         }
     }))
     .buffer_unordered(32)
@@ -213,7 +208,7 @@ pub async fn sync_to_disk(
     // Sync directories to disk
     stream::iter(target_dirs.into_iter().map(|path| async move {
         if let Ok(dir) = compio::fs::OpenOptions::new().read(true).open(&path).await {
-            let _ = dir.sync_all().await;
+            _ = dir.sync_all().await;
         }
     }))
     .buffer_unordered(16)
@@ -223,7 +218,7 @@ pub async fn sync_to_disk(
 
 pub fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
     // List of compound extensions to check
-    const COMPOUND_EXTENSIONS: &[&str] = &[
+    const COMPOUND_EXTENSIONS: [&str; 11] = [
         ".tar.gz",
         ".tar.bz2",
         ".tar.xz",
@@ -238,31 +233,22 @@ pub fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
     ];
 
     let mut to = to.to_owned();
-    if let Some(file_name) = from.file_name().and_then(|name| name.to_str()) {
+    if let Some(file_name) = from.file_name().and_then(OsStr::to_str) {
         let (stem, ext) = if from.is_dir() {
-            (file_name.to_string(), None)
+            (file_name, None)
         } else {
-            let file_name = file_name.to_string();
             COMPOUND_EXTENSIONS
-                .iter()
-                .copied()
-                .find(|&ext| file_name.ends_with(ext))
-                .map(|ext| {
-                    (
-                        file_name.strip_suffix(ext).unwrap().to_string(),
-                        Some(ext[1..].to_string()),
-                    )
+                .into_iter()
+                .find_map(|ext| {
+                    file_name
+                        .strip_suffix(ext)
+                        .map(|stripped_name| (stripped_name, Some(&ext[1..])))
                 })
-                .unwrap_or_else(|| {
+                .unwrap_or({
                     from.file_stem()
-                        .and_then(|s| s.to_str())
+                        .and_then(OsStr::to_str)
                         .map_or((file_name, None), |stem| {
-                            (
-                                stem.to_string(),
-                                from.extension()
-                                    .and_then(|e| e.to_str())
-                                    .map(str::to_string),
-                            )
+                            (stem, from.extension().and_then(OsStr::to_str))
                         })
                 })
         };
@@ -272,14 +258,14 @@ pub fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
                 file_name.to_string()
             } else {
                 match ext {
-                    Some(ref ext) => format!("{} ({} {}).{}", stem, fl!("copy_noun"), n, ext),
+                    Some(ext) => format!("{} ({} {}).{}", stem, fl!("copy_noun"), n, ext),
                     None => format!("{} ({} {})", stem, fl!("copy_noun"), n),
                 }
             };
 
             to.push(&new_name);
 
-            if !matches!(to.try_exists(), Ok(true)) {
+            if !to.exists() {
                 break;
             }
             // Continue if a copy with index exists
@@ -291,7 +277,7 @@ pub fn copy_unique_path(from: &Path, to: &Path) -> PathBuf {
 
 fn file_name(path: &Path) -> Cow<'_, str> {
     path.file_name()
-        .map_or_else(|| fl!("unknown-folder").into(), |x| x.to_string_lossy())
+        .map_or_else(|| fl!("unknown-folder").into(), OsStr::to_string_lossy)
 }
 
 fn parent_name(path: &Path) -> Cow<'_, str> {
@@ -488,11 +474,7 @@ impl Operation {
                 fl!("deleting", items = items.len(), progress = progress())
             }
             Self::EmptyTrash => fl!("emptying-trash", progress = progress()),
-            Self::Extract {
-                paths,
-                to,
-                password: _,
-            } => fl!(
+            Self::Extract { paths, to, .. } => fl!(
                 "extracting",
                 items = paths.len(),
                 from = paths_parent_name(paths),
@@ -529,7 +511,7 @@ impl Operation {
                 fl!(
                     "setting-permissions",
                     name = file_name(path),
-                    mode = format!("{:#03o}", mode)
+                    mode = format!("{mode:#03o}")
                 )
             }
         }
@@ -557,11 +539,7 @@ impl Operation {
             ),
             Self::DeleteTrash { items } => fl!("deleted", items = items.len()),
             Self::EmptyTrash => fl!("emptied-trash"),
-            Self::Extract {
-                paths,
-                to,
-                password: _,
-            } => fl!(
+            Self::Extract { paths, to, .. } => fl!(
                 "extracted",
                 items = paths.len(),
                 from = paths_parent_name(paths),
@@ -594,7 +572,7 @@ impl Operation {
                 fl!(
                     "set-permissions",
                     name = file_name(path),
-                    mode = format!("{:#03o}", mode)
+                    mode = format!("{mode:#03o}")
                 )
             }
         }
@@ -642,29 +620,22 @@ impl Operation {
         //TODO: IF ERROR, RETURN AN Operation THAT CAN UNDO THE CURRENT STATE
         let paths: Result<OperationSelection, OperationError> = match self {
             Self::Compress {
-                paths,
+                mut paths,
                 to,
                 archive_type,
                 password,
             } => {
-                let controller_c = controller.clone();
                 compio::runtime::spawn_blocking(
                     move || -> Result<OperationSelection, OperationError> {
-                        let controller = controller_c;
                         let Some(relative_root) = to.parent() else {
                             return Err(OperationError::from_err(
-                                format!("path {} has no parent directory", to.display()),
+                                format_args!("path {} has no parent directory", to.display()),
                                 &controller,
                             ));
                         };
 
-                        let op_sel = OperationSelection {
-                            ignored: paths.clone(),
-                            selected: vec![to.clone()],
-                        };
-
-                        let mut paths = paths;
-                        for path in &paths.clone() {
+                        let paths_clone = paths.clone();
+                        for path in &paths_clone {
                             if path.is_dir() {
                                 let new_paths_it = WalkDir::new(path).into_iter();
                                 for entry in new_paths_it.skip(1) {
@@ -690,12 +661,8 @@ impl Operation {
 
                                 let total_paths = paths.len();
                                 for (i, path) in paths.iter().enumerate() {
-                                    futures::executor::block_on(async {
-                                        controller
-                                            .check()
-                                            .await
-                                            .map_err(|e| OperationError::from_state(e, &controller))
-                                    })?;
+                                    futures::executor::block_on(controller.check())
+                                        .map_err(|e| OperationError::from_state(e, &controller))?;
 
                                     controller.set_progress((i as f32) / total_paths as f32);
 
@@ -725,21 +692,15 @@ impl Operation {
                                 let total_paths = paths.len();
                                 let mut buffer = vec![0; 4 * 1024 * 1024];
                                 for (i, path) in paths.iter().enumerate() {
-                                    futures::executor::block_on(async {
-                                        controller
-                                            .check()
-                                            .await
-                                            .map_err(|s| OperationError::from_state(s, &controller))
-                                    })?;
+                                    futures::executor::block_on(controller.check())
+                                        .map_err(|s| OperationError::from_state(s, &controller))?;
 
                                     controller.set_progress((i as f32) / total_paths as f32);
 
                                     let mut zip_options = zip::write::SimpleFileOptions::default();
-                                    if password.is_some() {
-                                        zip_options = zip_options.with_aes_encryption(
-                                            Aes256,
-                                            password.as_deref().unwrap(),
-                                        );
+                                    if let Some(ref password) = password {
+                                        zip_options =
+                                            zip_options.with_aes_encryption(Aes256, password);
                                     }
                                     if let Some(relative_path) = path
                                         .strip_prefix(relative_root)
@@ -771,11 +732,10 @@ impl Operation {
                                                 })?;
                                             let mut current = 0;
                                             loop {
-                                                futures::executor::block_on(async {
-                                                    controller.check().await.map_err(|s| {
+                                                futures::executor::block_on(controller.check())
+                                                    .map_err(|s| {
                                                         OperationError::from_state(s, &controller)
-                                                    })
-                                                })?;
+                                                    })?;
 
                                                 let count =
                                                     file.read(&mut buffer).map_err(|e| {
@@ -810,7 +770,10 @@ impl Operation {
                             }
                         }
 
-                        Ok(op_sel)
+                        Ok(OperationSelection {
+                            ignored: paths_clone,
+                            selected: vec![to],
+                        })
                     },
                 )
                 .await
@@ -822,12 +785,10 @@ impl Operation {
             Self::Delete { paths } => {
                 let total = paths.len();
                 for (i, path) in paths.into_iter().enumerate() {
-                    futures::executor::block_on(async {
-                        controller
-                            .check()
-                            .await
-                            .map_err(|s| OperationError::from_state(s, &controller))
-                    })?;
+                    controller
+                        .check()
+                        .await
+                        .map_err(|s| OperationError::from_state(s, &controller))?;
 
                     controller.set_progress((i as f32) / (total as f32));
 
@@ -854,12 +815,8 @@ impl Operation {
                         let controller = controller_clone;
                         let count = items.len();
                         for (i, item) in items.into_iter().enumerate() {
-                            futures::executor::block_on(async {
-                                controller
-                                    .check()
-                                    .await
-                                    .map_err(|s| OperationError::from_state(s, &controller))
-                            })?;
+                            futures::executor::block_on(controller.check())
+                                .map_err(|s| OperationError::from_state(s, &controller))?;
 
                             controller.set_progress(i as f32 / count as f32);
 
@@ -894,12 +851,8 @@ impl Operation {
                         let mut errors: Vec<trash::Error> = Vec::new();
 
                         for (i, item) in items.into_iter().enumerate() {
-                            futures::executor::block_on(async {
-                                controller
-                                    .check()
-                                    .await
-                                    .map_err(|s| OperationError::from_state(s, &controller))
-                            })?;
+                            futures::executor::block_on(controller.check())
+                                .map_err(|s| OperationError::from_state(s, &controller))?;
 
                             if let Err(e) = trash::os_limited::purge_all([item]) {
                                 errors.push(e);
@@ -939,19 +892,13 @@ impl Operation {
                 to,
                 password,
             } => {
-                let controller_clone = controller.clone();
                 compio::runtime::spawn_blocking(
                     move || -> Result<OperationSelection, OperationError> {
-                        let controller = controller_clone;
                         let total_paths = paths.len();
                         let mut op_sel = OperationSelection::default();
-                        for (i, path) in paths.iter().enumerate() {
-                            futures::executor::block_on(async {
-                                controller
-                                    .check()
-                                    .await
-                                    .map_err(|s| OperationError::from_state(s, &controller))
-                            })?;
+                        for (i, path) in paths.into_iter().enumerate() {
+                            futures::executor::block_on(controller.check())
+                                .map_err(|s| OperationError::from_state(s, &controller))?;
 
                             controller.set_progress((i as f32) / total_paths as f32);
 
@@ -965,10 +912,11 @@ impl Operation {
                                     new_dir = copy_unique_path(&new_dir, new_dir_parent);
                                 }
 
-                                op_sel.ignored.push(path.clone());
-                                op_sel.selected.push(new_dir.clone());
+                                let password = password.as_deref();
+                                crate::archive::extract(&path, &new_dir, password, &controller)?;
 
-                                crate::archive::extract(path, &new_dir, &password, &controller)?;
+                                op_sel.ignored.push(path);
+                                op_sel.selected.push(new_dir);
                             }
                         }
 
@@ -993,9 +941,7 @@ impl Operation {
                 .await
             }
             Self::NewFolder { path } => {
-                let controller_clone = controller.clone();
                 compio::runtime::spawn(async move {
-                    let controller = controller_clone;
                     controller
                         .check()
                         .await
@@ -1012,9 +958,7 @@ impl Operation {
             .await
             .map_err(wrap_compio_spawn_error)?,
             Self::NewFile { path } => {
-                let controller_clone = controller.clone();
                 compio::runtime::spawn(async move {
-                    let controller = controller_clone;
                     controller
                         .check()
                         .await
@@ -1061,7 +1005,7 @@ impl Operation {
             }
             Self::RemoveFromRecents { paths } => {
                 tokio::task::spawn_blocking(move || {
-                    let path_refs = paths.iter().map(PathBuf::as_path).collect::<Box<[_]>>();
+                    let path_refs: Box<[_]> = paths.iter().map(AsRef::as_ref).collect();
                     recently_used_xbel::remove_recently_used(&path_refs)
                 })
                 .await
@@ -1071,10 +1015,7 @@ impl Operation {
                 Ok(OperationSelection::default())
             }
             Self::Rename { from, to } => {
-                let controller_clone = controller.clone();
-
                 compio::runtime::spawn(async move {
-                    let controller = controller_clone;
                     controller
                         .check()
                         .await
@@ -1232,7 +1173,7 @@ mod tests {
         paths: Vec<PathBuf>,
         to: PathBuf,
     ) -> Result<OperationSelection, OperationError> {
-        let id = fastrand::u64(0..u64::MAX);
+        let id = fastrand::u64(..);
         let (tx, mut rx) = mpsc::channel(1);
         let paths_clone = paths.clone();
         let to_clone = to.clone();
